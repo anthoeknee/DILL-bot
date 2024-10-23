@@ -1,0 +1,9 @@
+discord.py
+python-dotenv
+pyyaml
+rich
+typing-extensions
+aiohttp
+asyncio
+google-api-python-client
+google-auth-oauthlib

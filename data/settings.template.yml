@@ -1,0 +1,5 @@
+# Bot Configuration
+token: "discord-token-here"  # Can be overridden by DISCORD_TOKEN env var
+command_prefix: "!"
+status_type: "playing"  # playing, watching, listening, competing
+status_text: "with my friends!"
