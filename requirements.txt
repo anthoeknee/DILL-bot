@@ -5,5 +5,4 @@ rich
 typing-extensions
 aiohttp
 asyncio
-google-api-python-client
-google-auth-oauthlib
+supabase

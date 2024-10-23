@@ -1,7 +1,7 @@
 import asyncio
 from typing import Optional
 from src.bot import DiscordBot
-from src.utils.logger import logger
+from src.utils.logging.logger import logger  # Fix this import path
 from src.config import config
 
 async def main() -> None:

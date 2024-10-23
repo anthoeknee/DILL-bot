@@ -1,6 +1,7 @@
 import discord
 from discord.ext import commands
-from src.utils.logger import logger
+from src.utils.logging.logger import logger  # Fix this import path
+from src.utils.helpers.sync import CommandSyncManager
 
 async def setup(bot: commands.Bot) -> None:
     """Sets up the on_ready event"""
@@ -10,14 +11,14 @@ async def setup(bot: commands.Bot) -> None:
         logger.info(f"Logged in as {bot.user.name} (ID: {bot.user.id})")
         logger.info(f"Connected to {len(bot.guilds)} guilds")
         
-        # Debug registered commands
-        logger.info("Registered Slash Commands:")
-        for cmd in bot.tree.get_commands():
-            logger.info(f"- /{cmd.name}")
-        
-        logger.info("Registered Prefix Commands:")
-        for cmd in bot.commands:
-            logger.info(f"- {bot.command_prefix}{cmd.name}")
+        # Check and sync commands if needed - Do this BEFORE setting presence
+        sync_manager = CommandSyncManager(bot)
+        try:
+            # Force sync on startup instead of checking
+            synced = await sync_manager.sync_commands()
+            logger.info(f"Synced {len(synced)} commands on startup")
+        except Exception as e:
+            logger.error(f"Failed to sync commands on startup: {e}", exc_info=True)
         
         # Set custom status from config
         status_text: str = bot.config.get('status_text', 'your commands')

@@ -4,9 +4,20 @@ from pathlib import Path
 from typing import Any, Dict, Optional
 
 class Config:
+    """Manages bot configuration from YAML file and environment variables."""
+    
     def __init__(self) -> None:
+        """Initialize configuration from environment variables and YAML file."""
+        # Load YAML first so we can use it in the initial config
         self._config: Dict[str, Any] = {}
         self.load_config()
+        
+        # Now update with environment variables and YAML values
+        self._config.update({
+            'supabase_url': os.getenv('SUPABASE_URL', 'your_supabase_url'),
+            'supabase_key': os.getenv('SUPABASE_KEY', 'your_supabase_service_key'),
+            'openai_api_key': os.getenv('OPENAI_API_KEY') or self._config.get('openai_api_key')
+        })
 
     def load_config(self) -> None:
         """Load configuration from YAML file."""
@@ -14,7 +25,8 @@ class Config:
         
         try:
             with open(config_path, 'r') as file:
-                self._config = yaml.safe_load(file)
+                yaml_config = yaml.safe_load(file) or {}
+                self._config.update(yaml_config)
         except FileNotFoundError:
             raise FileNotFoundError(f"Configuration file not found at {config_path}")
         except yaml.YAMLError as e:
@@ -23,22 +35,33 @@ class Config:
     def get(self, key: str, default: Any = None) -> Any:
         """
         Get a configuration value by key.
-        Returns default if key doesn't exist.
+        
+        Args:
+            key: Configuration key to retrieve
+            default: Default value if key doesn't exist
+            
+        Returns:
+            Configuration value or default
         """
+        # Check environment variables first
+        env_key = f'DISCORD_{key.upper()}'
+        env_value = os.getenv(env_key)
+        if env_value is not None:
+            return env_value
+            
         return self._config.get(key, default)
 
     def __getattr__(self, key: str) -> Any:
         """
-        Dynamically access configuration values as properties.
-        Prioritizes environment variables for keys prefixed with 'DISCORD_'.
+        Access configuration values as properties.
+        Prioritizes environment variables over YAML config.
         """
-        env_key: str = f'DISCORD_{key.upper()}'
-        env_value: Optional[str] = os.getenv(env_key)
-        
-        if env_value is not None:
-            return env_value
-            
-        return self._config.get(key)
+        return self.get(key)
+
+    @property
+    def token(self) -> Optional[str]:
+        """Get Discord bot token from environment or config."""
+        return os.getenv('DISCORD_TOKEN') or self._config.get('token')
 
 # Create a global instance
 config: Config = Config()
