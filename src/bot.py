@@ -64,49 +64,30 @@ class DiscordBot(commands.Bot):
     async def on_app_command_error(self, interaction: discord.Interaction, error: app_commands.AppCommandError) -> None:
         """Handle slash command errors"""
         if isinstance(error, app_commands.errors.MissingPermissions):
-            # Check if user is owner despite missing admin perms
-            if interaction.user.id == self.config.get('owner_id'):
-                try:
-                    # Get the command name
-                    command_name = interaction.command.name
-                    
-                    # Get command options based on the specific command
-                    kwargs = {}
-                    if command_name == "setup_forum_tracker":
-                        for name in ['forum_channel', 'spreadsheet_id']:
-                            if hasattr(interaction.namespace, name):
-                                kwargs[name] = getattr(interaction.namespace, name)
-                    elif command_name in ["set", "get", "delete"]:
-                        for name in ['key', 'value']:
-                            if hasattr(interaction.namespace, name):
-                                kwargs[name] = getattr(interaction.namespace, name)
-                    
-                    # Get the cog instance
-                    cog = interaction.command.binding
-                    
-                    # Call the command
-                    await interaction.command.callback(
-                        cog,
-                        interaction,
-                        **kwargs
-                    )
-                    return
-                except Exception as e:
-                    logger.error(f"Error executing command: {str(e)}")
-                    await interaction.response.send_message(
-                        f"Error executing command: {str(e)}",
-                        ephemeral=True
-                    )
-                    return
-            else:
-                await interaction.response.send_message(
-                    "You need administrator permissions to use this command.",
-                    ephemeral=True
-                )
-                return
-        
-        # Handle other errors
+            await interaction.response.send_message(
+                "❌ You don't have permission to use this command. Required permissions: " +
+                ", ".join(error.missing_permissions),
+                ephemeral=True
+            )
+            return
+            
+        if isinstance(error, app_commands.CommandOnCooldown):
+            await interaction.response.send_message(
+                f"⏳ This command is on cooldown. Try again in {error.retry_after:.1f} seconds.",
+                ephemeral=True
+            )
+            return
+            
+        if isinstance(error, app_commands.errors.CommandNotFound):
+            await interaction.response.send_message(
+                "❌ This command doesn't exist. Use `/help all` to see available commands.",
+                ephemeral=True
+            )
+            return
+
+        # Log unexpected errors
+        logger.error(f"Command error in {interaction.command}: {str(error)}")
         await interaction.response.send_message(
-            f"An error occurred: {str(error)}",
+            "❌ An unexpected error occurred. The bot administrator has been notified.",
             ephemeral=True
         )

@@ -6,26 +6,48 @@ from discord.ext import commands
 from discord.ui import Button, View
 
 class HelpView(View):
-    def __init__(self, help_cog: 'Help', interaction: discord.Interaction, pages: List[discord.Embed], timeout: float = 60.0):
-        super().__init__(timeout=timeout)
-        self.help_cog = help_cog
-        self.interaction = interaction
+    def __init__(self, pages):
+        super().__init__(timeout=180)  # 3 minute timeout
         self.pages = pages
         self.current_page = 0
-        
-    async def interaction_check(self, interaction: discord.Interaction) -> bool:
-        """Ensure only the original user can use the buttons"""
-        return interaction.user.id == self.interaction.user.id
-        
-    @discord.ui.button(label="◀", custom_id="prev")
-    async def prev_page(self, interaction: discord.Interaction, button: Button):
-        self.current_page = (self.current_page - 1) % len(self.pages)
-        await interaction.response.edit_message(embed=self.pages[self.current_page])
-        
-    @discord.ui.button(label="▶", custom_id="next")
-    async def next_page(self, interaction: discord.Interaction, button: Button):
-        self.current_page = (self.current_page + 1) % len(self.pages)
-        await interaction.response.edit_message(embed=self.pages[self.current_page])
+        self.total_pages = len(pages)
+        self.update_buttons()
+
+    def update_buttons(self):
+        self.clear_items()
+        # Home button (always visible except on first page)
+        if self.current_page > 0:
+            self.add_item(Button(label="🏠", style=discord.ButtonStyle.secondary, custom_id="home"))
+        # Previous page
+        if self.current_page > 0:
+            self.add_item(Button(label="◀", style=discord.ButtonStyle.secondary, custom_id="prev"))
+        # Page indicator (disabled button in the middle)
+        self.add_item(Button(
+            label=f"Page {self.current_page + 1}/{self.total_pages}",
+            style=discord.ButtonStyle.grey,
+            disabled=True
+        ))
+        # Next page
+        if self.current_page < self.total_pages - 1:
+            self.add_item(Button(label="▶", style=discord.ButtonStyle.secondary, custom_id="next"))
+
+    @discord.ui.button(label="🏠", style=discord.ButtonStyle.secondary, custom_id="home")
+    async def home_button(self, interaction: discord.Interaction, button: Button):
+        self.current_page = 0
+        self.update_buttons()
+        await interaction.response.edit_message(embed=self.pages[self.current_page], view=self)
+
+    @discord.ui.button(label="◀", style=discord.ButtonStyle.secondary, custom_id="prev")
+    async def prev_button(self, interaction: discord.Interaction, button: Button):
+        self.current_page -= 1
+        self.update_buttons()
+        await interaction.response.edit_message(embed=self.pages[self.current_page], view=self)
+
+    @discord.ui.button(label="▶", style=discord.ButtonStyle.secondary, custom_id="next")
+    async def next_button(self, interaction: discord.Interaction, button: Button):
+        self.current_page += 1
+        self.update_buttons()
+        await interaction.response.edit_message(embed=self.pages[self.current_page], view=self)
 
 class Help(commands.GroupCog, group_name="help"):
     """Help commands for the bot"""
@@ -121,7 +143,7 @@ class Help(commands.GroupCog, group_name="help"):
             pages.append(self.create_command_embed(page_commands, page, total_pages))
         
         # Send first page with navigation buttons
-        view = HelpView(self, interaction, pages)
+        view = HelpView(pages)
         await interaction.response.send_message(embed=pages[0], view=view)
     
     @app_commands.command(name="command")

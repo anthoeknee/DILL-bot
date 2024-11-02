@@ -8,3 +8,4 @@ asyncio
 google-api-python-client
 google-auth-oauthlib
 google-auth-httplib2
+oauth2client<4.0.0
