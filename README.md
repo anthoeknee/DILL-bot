@@ -176,5 +176,3 @@ This project is licensed under the [MIT License](LICENSE).
 - [Rich](https://rich.readthedocs.io/en/stable/) for enhanced logging and console outputs.
 
 ---
-
-Feel free to customize this README further to match the specifics of your project and any additional features you may have implemented.
