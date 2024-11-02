@@ -1,5 +1,6 @@
-# Bot Configuration
-token: "discord-token-here"  # Can be overridden by DISCORD_TOKEN env var
+token: "YOUR_DISCORD_BOT_TOKEN"
+owner_id: YOUR_DISCORD_USER_ID
 command_prefix: "!"
-status_type: "playing"  # playing, watching, listening, competing
-status_text: "with my friends!"
+bot_description: "A Discord Bot with custom commands."
+status_text: "your commands"
+status_type: "watching"  # Options: playing, streaming, listening, watching
