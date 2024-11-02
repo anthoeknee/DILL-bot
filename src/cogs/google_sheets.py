@@ -12,7 +12,7 @@ from src.utils.settings_manager import SettingType
 from src.utils.logger import logger
 from datetime import datetime
 import asyncio
-
+from src.config import config
 class GoogleSheets(commands.Cog):
     """Manage Google Sheets integration for forum tracking"""
     
@@ -259,8 +259,10 @@ class GoogleSheets(commands.Cog):
         spreadsheet_id="The Google Spreadsheet ID",
         include_history="Whether to load all historical posts (True) or only track new ones (False)"
     )
-    @app_commands.checks.has_permissions(administrator=True)
-    @is_owner()
+    @app_commands.check(lambda interaction: 
+        interaction.user.guild_permissions.administrator and    
+        interaction.user.id == config.get('owner_id')
+    )
     async def setup_forum_tracker(
         self,
         interaction: discord.Interaction,

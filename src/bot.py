@@ -1,8 +1,8 @@
 import discord
 from discord.ext import commands
 from typing import Optional, Union
-from .utils.logger import logger
-from .config import config, Config
+from src.utils.logger import logger
+from src.config import config, Config
 from src.utils.loader import ModuleLoader
 from discord import Interaction
 from discord.app_commands import AppCommandError, errors
@@ -63,12 +63,18 @@ class DiscordBot(commands.Bot):
     
     async def on_app_command_error(self, interaction: discord.Interaction, error: app_commands.AppCommandError) -> None:
         """Handle slash command errors"""
-        if isinstance(error, app_commands.errors.MissingPermissions):
-            await interaction.response.send_message(
-                "❌ You don't have permission to use this command. Required permissions: " +
-                ", ".join(error.missing_permissions),
-                ephemeral=True
-            )
+        # Check for check failures first
+        if isinstance(error, app_commands.errors.CheckFailure):
+            if not interaction.response.is_done():
+                await interaction.response.send_message(
+                    "❌ You don't have permission to use this command.",
+                    ephemeral=True
+                )
+            else:
+                await interaction.followup.send(
+                    "❌ You don't have permission to use this command.",
+                    ephemeral=True
+                )
             return
             
         if isinstance(error, app_commands.CommandOnCooldown):
