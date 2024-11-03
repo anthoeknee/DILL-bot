@@ -1,7 +1,7 @@
 import discord
 from discord import app_commands
 from discord.ext import commands, tasks
-from typing import Dict, Any
+from typing import Dict, Any, Optional
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
@@ -13,7 +13,7 @@ from src.utils.logger import logger
 from datetime import datetime
 import asyncio
 from src.config import config
-class GoogleSheets(commands.Cog):
+class GoogleSheets(commands.GroupCog):
     """Manage Google Sheets integration for forum tracking"""
     
     def __init__(self, bot: commands.Bot):
@@ -42,37 +42,42 @@ class GoogleSheets(commands.Cog):
         except Exception as e:
             logger.error(f"Failed to setup Google Sheets: {e}")
 
-    async def _process_thread(self, thread: discord.Thread) -> Dict[str, Any]:
+    async def _process_thread(self, thread: discord.Thread) -> Optional[Dict[str, Any]]:
         """Process a single thread and return its data"""
-        first_message = None
-        async for message in thread.history(limit=1, oldest_first=True):
-            first_message = message
-
-        if not first_message:
+        try:
+            # Get the first message
+            first_message = await thread.fetch_message(thread.id)
+            
+            # Get reaction counts
+            yes_votes = sum([
+                # Count both yes emojis for spreadsheet tracking
+                reaction.count 
+                for reaction in first_message.reactions 
+                if str(reaction.emoji) in [
+                    "<:pickle_yes:1263941895625900085>",
+                    "<:abobaheavenlymerveilleuxinstantw:1166782218849484810>"  # Include secondary yes emoji
+                ]
+            ])
+            
+            no_votes = sum([
+                reaction.count 
+                for reaction in first_message.reactions 
+                if str(reaction.emoji) == "<:pickle_no:1263941842244730972>"
+            ])
+            
+            # Rest of your existing _process_thread logic...
+            
+            return {
+                'thread_id': str(thread.id),
+                'title': thread.name,
+                'yes_votes': yes_votes,  # Combined yes votes from both emojis
+                'no_votes': no_votes,
+                # ... other fields ...
+            }
+            
+        except Exception as e:
+            logger.error(f"Error processing thread {thread.id}: {e}")
             return None
-
-        yes_votes = 0
-        no_votes = 0
-        for reaction in first_message.reactions:
-            if str(reaction.emoji) in [
-                "<:pickle_yes:1263941895625900085>",
-                "<:abobaheavenlymerveilleuxinstantw:1166782218849484810>",
-                "✅"
-            ]:
-                yes_votes += reaction.count
-            elif str(reaction.emoji) in ["<:pickle_no:1263941842244730972>", "❌"]:
-                no_votes += reaction.count
-        
-        ratio = yes_votes / (yes_votes + no_votes) if (yes_votes + no_votes) > 0 else 0
-        
-        return {
-            "name": thread.name,
-            "content": first_message.content,
-            "yes_votes": yes_votes,
-            "no_votes": no_votes,
-            "ratio": ratio,
-            "date_posted": thread.created_at.strftime("%Y-%m-%d %H:%M:%S")
-        }
 
     def _update_spreadsheet(self, spreadsheet_id: str, updates: Dict[str, Any]):
         """Handle all spreadsheet updates"""

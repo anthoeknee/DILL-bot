@@ -43,9 +43,9 @@ async def setup(bot: commands.Bot) -> None:
         async for first_message in message.channel.history(limit=1, oldest_first=True):
             if message.id == first_message.id:
                 try:
-                    # Define all reactions to add
+                    # Only add the primary yes/no reactions
                     reactions = [
-                        "<:pickle_yes:1263941895625900085>",    # Yes vote
+                        "<:pickle_yes:1263941895625900085>",    # Primary Yes vote
                         "<:pickle_no:1263941842244730972>"      # No vote
                     ]
                     
@@ -53,8 +53,7 @@ async def setup(bot: commands.Bot) -> None:
                     for reaction in reactions:
                         try:
                             await message.add_reaction(reaction)
-                            # Add a small delay between reactions to prevent rate limiting
-                            await asyncio.sleep(0.5)
+                            await asyncio.sleep(0.5)  # Small delay between reactions
                         except discord.HTTPException as e:
                             logger.error(f"Failed to add reaction {reaction} to message {message.id}: {e}")
                             continue
