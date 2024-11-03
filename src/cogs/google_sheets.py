@@ -110,7 +110,7 @@ class GoogleSheets(commands.GroupCog):
         if updates['to_add']:
             self.sheet_service.spreadsheets().values().append(
                 spreadsheetId=spreadsheet_id,
-                range="B2:F2",
+                range="B2:G2",
                 valueInputOption="RAW",
                 insertDataOption="INSERT_ROWS",
                 body={"values": updates['to_add']}
@@ -155,7 +155,7 @@ class GoogleSheets(commands.GroupCog):
                 asyncio.to_thread(
                     self.sheet_service.spreadsheets().values().get(
                         spreadsheetId=forum_data["spreadsheet_id"],
-                        range="B2:G"  # Update this range
+                        range="B2:G"  # Changed to B2:G for 6 columns
                     ).execute
                 )
             )
@@ -278,24 +278,25 @@ class GoogleSheets(commands.GroupCog):
     ):
         """Setup forum tracking to Google Sheets"""
         try:
-            # Initialize headers if needed
+            # Check if headers exist
             result = self.sheet_service.spreadsheets().values().get(
                 spreadsheetId=spreadsheet_id,
-                range="B1:G1"  # Update this range
+                range="B1:G1"
             ).execute()
-            
+
+            # Only creates headers if they don't exist
             if 'values' not in result:
                 self.sheet_service.spreadsheets().values().update(
                     spreadsheetId=spreadsheet_id,
-                    range="B1:G1",  # Update this range
-                    valueInputOption="USER_ENTERED",  # Changed from "RAW"
-                    body={"values": [["Level Name", "Post Description", "Yes Votes", "No Votes", "Ratio", "Date Posted"]]}  # Add new column
+                    range="B1:G1",
+                    valueInputOption="USER_ENTERED",
+                    body={"values": [["Level Name", "Post Description", "Yes Votes", "No Votes", "Ratio", "Date Posted"]]}
                 ).execute()
 
             tracker_data = {
                 "forum_id": forum_channel.id,
                 "spreadsheet_id": spreadsheet_id,
-                "sheet_range": "B2:G",  # Update this range
+                "sheet_range": "B2:G",  # Changed to B2:G
                 "update_interval": 5,
                 "load_history": include_history
             }
@@ -315,7 +316,7 @@ class GoogleSheets(commands.GroupCog):
                 f"• Tracking: {forum_channel.name}\n" +
                 "• Sheet Range: B2:G\n" +
                 f"• Historical Posts: {'Enabled' if include_history else 'Disabled'}\n" +
-                "• Data columns: Level Name, Post Description, Yes Votes, No Votes, Ratio, Date Posted",
+                "• Data columns: Level Name, Post Description, Yes Votes, No Votes, Ratio, Date Posted, Status",
                 ephemeral=True
             )
 
