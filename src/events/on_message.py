@@ -2,6 +2,8 @@ import discord
 from discord.ext import commands
 import json
 from typing import Optional
+import asyncio
+from src.utils.logger import logger
 
 async def setup(bot: commands.Bot) -> None:
     """Sets up the on_message event"""
@@ -40,7 +42,22 @@ async def setup(bot: commands.Bot) -> None:
         # Only add reactions to the first message in the thread
         async for first_message in message.channel.history(limit=1, oldest_first=True):
             if message.id == first_message.id:
-                # Add voting reactions
-                await message.add_reaction("<:pickle_yes:1263941895625900085>")  # Yes vote
-                await message.add_reaction("<:abobaheavenlymerveilleuxinstantw:1166782218849484810>")  # Second Yes vote
-                await message.add_reaction("<:pickle_no:1263941842244730972>")   # No vote
+                try:
+                    # Define all reactions to add
+                    reactions = [
+                        "<:pickle_yes:1263941895625900085>",    # Yes vote
+                        "<:pickle_no:1263941842244730972>"      # No vote
+                    ]
+                    
+                    # Add each reaction with error handling
+                    for reaction in reactions:
+                        try:
+                            await message.add_reaction(reaction)
+                            # Add a small delay between reactions to prevent rate limiting
+                            await asyncio.sleep(0.5)
+                        except discord.HTTPException as e:
+                            logger.error(f"Failed to add reaction {reaction} to message {message.id}: {e}")
+                            continue
+                        
+                except Exception as e:
+                    logger.error(f"Error adding reactions to message {message.id}: {e}")
