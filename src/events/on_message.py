@@ -42,4 +42,5 @@ async def setup(bot: commands.Bot) -> None:
             if message.id == first_message.id:
                 # Add voting reactions
                 await message.add_reaction("<:pickle_yes:1263941895625900085>")  # Yes vote
+                await message.add_reaction("<:abobaheavenlymerveilleuxinstantw:1166782218849484810>")  # Second Yes vote
                 await message.add_reaction("<:pickle_no:1263941842244730972>")   # No vote

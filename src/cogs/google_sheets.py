@@ -54,7 +54,11 @@ class GoogleSheets(commands.Cog):
         yes_votes = 0
         no_votes = 0
         for reaction in first_message.reactions:
-            if str(reaction.emoji) in ["<:pickle_yes:1263941895625900085>", "✅"]:
+            if str(reaction.emoji) in [
+                "<:pickle_yes:1263941895625900085>",
+                "<:abobaheavenlymerveilleuxinstantw:1166782218849484810>",
+                "✅"
+            ]:
                 yes_votes += reaction.count
             elif str(reaction.emoji) in ["<:pickle_no:1263941842244730972>", "❌"]:
                 no_votes += reaction.count
