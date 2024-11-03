@@ -7,7 +7,7 @@ from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 import json
 from pathlib import Path
-from src.utils.checks import is_owner
+from src.utils.checks import is_owner, is_admin_or_owner
 from src.utils.settings_manager import SettingType
 from src.utils.logger import logger
 from datetime import datetime
@@ -259,10 +259,7 @@ class GoogleSheets(commands.Cog):
         spreadsheet_id="The Google Spreadsheet ID",
         include_history="Whether to load all historical posts (True) or only track new ones (False)"
     )
-    @app_commands.check(lambda interaction: 
-        interaction.user.guild_permissions.administrator and    
-        interaction.user.id == config.get('owner_id')
-    )
+    @is_admin_or_owner()
     async def setup_forum_tracker(
         self,
         interaction: discord.Interaction,
