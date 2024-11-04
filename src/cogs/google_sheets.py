@@ -50,12 +50,11 @@ class GoogleSheets(commands.GroupCog):
             
             # Get reaction counts
             yes_votes = sum([
-                # Count both yes emojis for spreadsheet tracking
                 reaction.count 
                 for reaction in first_message.reactions 
                 if str(reaction.emoji) in [
                     "<:pickle_yes:1263941895625900085>",
-                    "<:abobaheavenlymerveilleuxinstantw:1166782218849484810>"  # Include secondary yes emoji
+                    "<:abobaheavenlymerveilleuxinstantw:1166782218849484810>"
                 ]
             ])
             
@@ -65,14 +64,18 @@ class GoogleSheets(commands.GroupCog):
                 if str(reaction.emoji) == "<:pickle_no:1263941842244730972>"
             ])
             
-            # Rest of your existing _process_thread logic...
+            # Calculate ratio
+            total_votes = yes_votes + no_votes
+            ratio = f"{(yes_votes / total_votes * 100):.1f}%" if total_votes > 0 else "0%"
             
             return {
                 'thread_id': str(thread.id),
                 'title': thread.name,
-                'yes_votes': yes_votes,  # Combined yes votes from both emojis
+                'content': first_message.content[:500] if first_message.content else "No content",
+                'yes_votes': yes_votes,
                 'no_votes': no_votes,
-                # ... other fields ...
+                'ratio': ratio,
+                'date_posted': thread.created_at.strftime("%Y-%m-%d %H:%M:%S")
             }
             
         except Exception as e:
@@ -231,17 +234,17 @@ class GoogleSheets(commands.GroupCog):
             # Process threads in chronological order
             for _, thread, thread_data in thread_data_with_timestamps:
                 row_data = [
-                    thread_data["name"],
+                    thread_data["title"],
                     thread_data["content"],
                     thread_data["yes_votes"],
                     thread_data["no_votes"],
                     thread_data["ratio"],
-                    thread_data["date_posted"]  # Add this line
+                    thread_data["date_posted"]
                 ]
 
                 if thread.name in existing_threads:
                     updates['to_update'].append({
-                        'range': f'B{existing_threads[thread.name]}:G{existing_threads[thread.name]}',  # Update this range
+                        'range': f'B{existing_threads[thread.name]}:G{existing_threads[thread.name]}',
                         'values': [row_data]
                     })
                 else:
