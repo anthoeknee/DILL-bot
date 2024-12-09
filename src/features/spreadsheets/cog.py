@@ -1,6 +1,6 @@
 import discord
 from discord.ext import commands, tasks
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Tuple, Optional, Dict, List
 from src.utils.decorators import can_use, PermissionLevel
 from src.features.spreadsheets.helpers.google import GoogleSheetsClient
@@ -19,6 +19,12 @@ VALID_YES_EMOJIS = [
 VALID_NO_EMOJIS = ["pickle_no", "x"]
 NEW_YES_EMOJI = "pickle_yes"
 NEW_NO_EMOJI = "pickle_no"
+
+TAG_IDS = {
+    "NOT_IN_LIST": 1258877875457626154,
+    "ADDED_TO_LIST": 1298038416025452585,
+    "INITIAL_VOTE": 1315553680874803291,
+}
 
 
 class SpreadsheetCog(commands.Cog):
@@ -40,6 +46,7 @@ class SpreadsheetCog(commands.Cog):
         # Start background tasks
         self.check_votes.start()
         self.process_backlog.start()
+        self.check_ratios.start()  # Start the ratio checking task
 
     async def get_server_config(self, guild_id: int) -> Optional[ManagedServer]:
         """Get server configuration from database"""
@@ -133,7 +140,7 @@ class SpreadsheetCog(commands.Cog):
                     continue
 
                 # Process threads that are at least 24 hours old
-                cutoff_time = datetime.utcnow() - timedelta(hours=24)
+                cutoff_time = datetime.now(timezone.utc) - timedelta(hours=24)
 
                 # Process archived threads
                 async for thread in channel.archived_threads(limit=None):
@@ -175,8 +182,22 @@ class SpreadsheetCog(commands.Cog):
         """Process votes for a single thread"""
         try:
             # Check if thread is at least 24 hours old
-            time_since_creation = datetime.utcnow() - thread.created_at
+            time_since_creation = datetime.now(timezone.utc) - thread.created_at
             if time_since_creation < timedelta(hours=24):
+                return
+
+            # Check current tags by ID
+            current_tag_ids = [str(tag.id) for tag in thread.applied_tags]
+
+            # Skip if thread already has a final status tag
+            if (
+                str(TAG_IDS["ADDED_TO_LIST"]) in current_tag_ids
+                or str(TAG_IDS["NOT_IN_LIST"]) in current_tag_ids
+            ):
+                return
+
+            # Only process if "Initial Vote" tag is present
+            if str(TAG_IDS["INITIAL_VOTE"]) not in current_tag_ids:
                 return
 
             yes_votes, no_votes = await self.count_votes(thread)
@@ -186,27 +207,23 @@ class SpreadsheetCog(commands.Cog):
                 return
 
             yes_ratio = yes_votes / total_votes
-            current_tags = [tag.name for tag in thread.applied_tags]
 
-            # Only process if "Initial Vote" tag is present
-            if "Initial Vote" not in current_tags:
-                return
-
-            # Determine new tag based on vote ratio (using 50.01% threshold)
-            new_tag = "Added to List" if yes_ratio > 0.5001 else "Not in Any List"
+            # Determine if approved based on ratio
+            is_approved = yes_ratio > 0.5001
 
             # Update tags
-            await self.update_thread_tags(thread, new_tag)
+            await self.update_thread_tags(thread, is_approved)
 
             # Update spreadsheet if necessary
-            if new_tag == "Added to List":
+            if is_approved:
                 await self.add_to_spreadsheet(thread)
 
             # Notify about the tag change
+            status = "Added to List" if is_approved else "Not in Any List"
             await self.notify_owners(
-                f"Thread '{thread.name}' ({thread.jump_url}) has been processed after 24 hours:\n"
+                f"Thread '{thread.name}' ({thread.jump_url}) has been processed:\n"
                 f"Final ratio: {yes_votes}/{total_votes} votes ({yes_ratio:.2%})\n"
-                f"Status: {new_tag}"
+                f"Status: {status}"
             )
 
         except Exception as e:
@@ -242,30 +259,40 @@ class SpreadsheetCog(commands.Cog):
             logger.error(f"Error counting votes in thread {thread.id}: {e}")
             return 0, 0
 
-    async def update_thread_tags(self, thread: discord.Thread, new_tag: str):
-        """Update thread tags"""
+    async def update_thread_tags(self, thread: discord.Thread, is_approved: bool):
+        """Update thread tags using tag IDs"""
         try:
             # Get available tags
             forum_channel = thread.parent
-            available_tags = {tag.name: tag for tag in forum_channel.available_tags}
+            available_tags = {str(tag.id): tag for tag in forum_channel.available_tags}
 
-            if new_tag not in available_tags:
-                logger.error(f"Tag '{new_tag}' not found in available tags")
+            # Determine new tag ID based on approval
+            new_tag_id = str(
+                TAG_IDS["ADDED_TO_LIST"] if is_approved else TAG_IDS["NOT_IN_LIST"]
+            )
+
+            if new_tag_id not in available_tags:
+                logger.error(f"Tag ID {new_tag_id} not found in available tags")
                 return
 
             # Remove old status tags
             current_tags = [
                 tag
                 for tag in thread.applied_tags
-                if tag.name not in ["Added to List", "Not in Any List", "Initial Vote"]
+                if str(tag.id)
+                not in [
+                    str(TAG_IDS["ADDED_TO_LIST"]),
+                    str(TAG_IDS["NOT_IN_LIST"]),
+                    str(TAG_IDS["INITIAL_VOTE"]),
+                ]
             ]
 
             # Add new tag
-            current_tags.append(available_tags[new_tag])
+            current_tags.append(available_tags[new_tag_id])
 
             # Update thread tags
             await thread.edit(applied_tags=current_tags)
-            logger.info(f"Updated tags for thread {thread.id}: {new_tag}")
+            logger.info(f"Updated tags for thread {thread.id}")
 
         except Exception as e:
             logger.error(f"Error updating tags for thread {thread.id}: {e}")
@@ -647,6 +674,273 @@ class SpreadsheetCog(commands.Cog):
             logger.error(f"Error in sync_spreadsheet: {e}")
             await interaction.followup.send(
                 "❌ An error occurred while syncing the spreadsheet."
+            )
+
+    @app_commands.command(
+        name="process_untagged",
+        description="Process all untagged threads and add appropriate tags based on vote ratios",
+    )
+    @can_use(PermissionLevel.ADMIN)
+    async def process_untagged(self, interaction: discord.Interaction):
+        """Process all threads without status tags and add appropriate tags based on vote ratios"""
+        await interaction.response.defer(thinking=True)
+
+        try:
+            server_config = await self.get_server_config(interaction.guild.id)
+            if not server_config:
+                await interaction.followup.send(
+                    "This server is not configured for management."
+                )
+                return
+
+            channel = self.bot.get_channel(int(server_config.forum_channel_id))
+            if not channel or not isinstance(channel, discord.ForumChannel):
+                await interaction.followup.send(
+                    "Could not find the configured forum channel."
+                )
+                return
+
+            progress_msg = await interaction.followup.send("Collecting threads...")
+
+            # Collect all threads
+            all_threads = []
+            all_threads.extend([t for t in channel.threads])
+            async for thread in channel.archived_threads(limit=None):
+                all_threads.append(thread)
+
+            # Filter eligible threads
+            cutoff_time = datetime.now(timezone.utc) - timedelta(hours=24)
+            eligible_threads = []
+
+            for thread in all_threads:
+                current_tag_ids = [str(tag.id) for tag in thread.applied_tags]
+                if (
+                    thread.created_at <= cutoff_time
+                    and str(TAG_IDS["INITIAL_VOTE"]) in current_tag_ids
+                    and str(TAG_IDS["ADDED_TO_LIST"]) not in current_tag_ids
+                    and str(TAG_IDS["NOT_IN_LIST"]) not in current_tag_ids
+                ):
+                    eligible_threads.append(thread)
+
+            if not eligible_threads:
+                await progress_msg.edit(content="No eligible threads found to process.")
+                return
+
+            await progress_msg.edit(
+                content=f"Processing {len(eligible_threads)} threads..."
+            )
+
+            # Process threads in smaller batches with rate limiting
+            BATCH_SIZE = 5  # Reduced batch size
+            processed_count = 0
+            approved_threads = []
+
+            for i in range(0, len(eligible_threads), BATCH_SIZE):
+                batch = eligible_threads[i : i + BATCH_SIZE]
+
+                # Process batch with rate limiting
+                for thread in batch:
+                    # Count votes
+                    yes_votes, no_votes = await self.count_votes(thread)
+                    total_votes = yes_votes + no_votes
+
+                    if total_votes > 0:
+                        yes_ratio = yes_votes / total_votes
+                        is_approved = yes_ratio > 0.5001
+
+                        # Update tags
+                        await self.update_thread_tags(thread, is_approved)
+                        processed_count += 1
+
+                        if is_approved:
+                            approved_threads.append(thread)
+
+                        # Send notification
+                        status = "Added to List" if is_approved else "Not in Any List"
+                        await self.notify_owners(
+                            f"Thread '{thread.name}' processed: {yes_votes}/{total_votes} votes ({yes_ratio:.2%}) - {status}"
+                        )
+
+                    # Add delay between thread processing
+                    await asyncio.sleep(1.5)  # 1.5 second delay between threads
+
+                # Update progress every batch
+                await progress_msg.edit(
+                    content=f"Processed {processed_count}/{len(eligible_threads)} threads..."
+                )
+
+                # Add delay between batches
+                await asyncio.sleep(2)  # 2 second delay between batches
+
+            # Update spreadsheet for approved threads in smaller batches
+            if approved_threads:
+                await progress_msg.edit(
+                    content="Updating spreadsheet with approved threads..."
+                )
+                SPREADSHEET_BATCH_SIZE = 5
+                for i in range(0, len(approved_threads), SPREADSHEET_BATCH_SIZE):
+                    batch = approved_threads[i : i + SPREADSHEET_BATCH_SIZE]
+                    for thread in batch:
+                        await self.add_to_spreadsheet(thread)
+                        await asyncio.sleep(
+                            1
+                        )  # 1 second delay between spreadsheet updates
+
+            final_message = (
+                f"✅ Processed {processed_count} threads!\n"
+                f"Added {len(approved_threads)} threads to the spreadsheet."
+            )
+            await progress_msg.edit(content=final_message)
+
+        except Exception as e:
+            logger.error(f"Error in process_untagged: {e}")
+            await interaction.followup.send(
+                "❌ An error occurred while processing threads."
+            )
+
+    @tasks.loop(minutes=10)
+    async def check_ratios(self):
+        """Periodically check vote ratios and update tags accordingly"""
+        try:
+            with get_db() as db:
+                servers = (
+                    db.query(ManagedServer)
+                    .filter(ManagedServer.enabled.is_(True))
+                    .all()
+                )
+
+            for server in servers:
+                if not server.notification_channel_id:
+                    continue
+
+                channel = self.bot.get_channel(int(server.forum_channel_id))
+                notification_channel = self.bot.get_channel(
+                    int(server.notification_channel_id)
+                )
+
+                if not channel or not notification_channel:
+                    continue
+
+                # Process both active and archived threads
+                threads = []
+                threads.extend([t for t in channel.threads])
+                async for thread in channel.archived_threads(limit=None):
+                    threads.append(thread)
+
+                for thread in threads:
+                    await self.check_thread_ratio(thread, server, notification_channel)
+
+        except Exception as e:
+            logger.error(f"Error in check_ratios: {e}")
+
+    async def check_thread_ratio(
+        self,
+        thread: discord.Thread,
+        server: ManagedServer,
+        notification_channel: discord.TextChannel,
+    ):
+        """Check a thread's vote ratio and update tags if necessary"""
+        try:
+            current_tag_ids = [str(tag.id) for tag in thread.applied_tags]
+            yes_votes, no_votes = await self.count_votes(thread)
+            total_votes = yes_votes + no_votes
+
+            if total_votes == 0:
+                return
+
+            ratio = yes_votes / total_votes
+
+            # Check if thread needs tag updates based on ratio
+            if str(server.added_to_list_tag_id) in current_tag_ids and ratio < 0.34:
+                # Remove "Added to List" tag and add "Not in List" tag
+                await self.update_thread_tags(thread, False)
+                await notification_channel.send(
+                    f"⚠️ **Alert:** Thread '{thread.name}' has fallen below 34% approval ({ratio:.2%})\n{thread.jump_url}"
+                )
+
+            elif str(server.not_in_list_tag_id) in current_tag_ids and ratio > 0.5001:
+                # Remove "Not in List" tag and add "Added to List" tag
+                await self.update_thread_tags(thread, True)
+                await notification_channel.send(
+                    f"🎉 **Alert:** Thread '{thread.name}' has risen above 50% approval ({ratio:.2%})\n{thread.jump_url}"
+                )
+
+        except Exception as e:
+            logger.error(f"Error checking thread ratio: {e}")
+
+    @app_commands.command(
+        name="set_notification_channel",
+        description="Set the channel for ratio change notifications",
+    )
+    @can_use(PermissionLevel.ADMIN)
+    async def set_notification_channel(
+        self, interaction: discord.Interaction, channel: discord.TextChannel
+    ):
+        """Set the channel where ratio change notifications will be sent"""
+        try:
+            with get_db() as db:
+                server = (
+                    db.query(ManagedServer)
+                    .filter(ManagedServer.server_id == str(interaction.guild_id))
+                    .first()
+                )
+
+                if not server:
+                    await interaction.response.send_message(
+                        "Server not configured yet!"
+                    )
+                    return
+
+                server.notification_channel_id = str(channel.id)
+                db.commit()
+
+            await interaction.response.send_message(
+                f"Notification channel set to {channel.mention}"
+            )
+
+        except Exception as e:
+            logger.error(f"Error setting notification channel: {e}")
+            await interaction.response.send_message(
+                "An error occurred while setting the notification channel."
+            )
+
+    @app_commands.command(
+        name="set_tag_ids", description="Set the tag IDs for vote status"
+    )
+    @can_use(PermissionLevel.ADMIN)
+    async def set_tag_ids(
+        self,
+        interaction: discord.Interaction,
+        initial_vote_tag_id: str,
+        added_to_list_tag_id: str,
+        not_in_list_tag_id: str,
+    ):
+        """Set the tag IDs used for vote status"""
+        try:
+            with get_db() as db:
+                server = (
+                    db.query(ManagedServer)
+                    .filter(ManagedServer.server_id == str(interaction.guild_id))
+                    .first()
+                )
+
+                if not server:
+                    await interaction.response.send_message(
+                        "Server not configured yet!"
+                    )
+                    return
+
+                server.initial_vote_tag_id = initial_vote_tag_id
+                server.added_to_list_tag_id = added_to_list_tag_id
+                server.not_in_list_tag_id = not_in_list_tag_id
+                db.commit()
+
+            await interaction.response.send_message("Tag IDs updated successfully!")
+
+        except Exception as e:
+            logger.error(f"Error setting tag IDs: {e}")
+            await interaction.response.send_message(
+                "An error occurred while setting the tag IDs."
             )
 
 

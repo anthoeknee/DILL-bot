@@ -6,3 +6,4 @@ docs/
 logs/
 .copilot-instructions.md
 data/*
+t.session.sql

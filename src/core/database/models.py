@@ -27,6 +27,10 @@ class ManagedServer(Base):
     forum_channel_id = Column(String, nullable=False)
     spreadsheet_id = Column(String, nullable=False)
     enabled = Column(Boolean, default=True)
+    notification_channel_id = Column(String)
+    initial_vote_tag_id = Column(String)
+    added_to_list_tag_id = Column(String)
+    not_in_list_tag_id = Column(String)
 
 
 class ValidTag(Base):
