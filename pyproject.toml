@@ -1,0 +1,21 @@
+[tool.poetry]
+name = "dill-v2"
+version = "0.1.0"
+description = ""
+authors = ["anthoeknee <pacyheb@protonmail.com>"]
+readme = "README.md"
+
+[tool.poetry.dependencies]
+python = "^3.11"
+pydantic-settings = "^2.6.1"
+sqlalchemy = "^2.0.36"
+alembic = "^1.14.0"
+discord-py = "^2.4.0"
+google-api-python-client = "^2.154.0"
+google-auth-httplib2 = "^0.2.0"
+google-auth-oauthlib = "^1.2.1"
+
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
