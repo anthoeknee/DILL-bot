@@ -1,5 +1,5 @@
 import os.path
-from typing import List, Any
+from typing import List, Any, Dict
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
@@ -135,3 +135,50 @@ class GoogleSheetsClient:
         except HttpError as error:
             print(f"An error occurred: {error}")
             return False
+
+    def batch_get_values(
+        self, spreadsheet_id: str, ranges: List[str]
+    ) -> Dict[str, List[List[Any]]]:
+        """Batch get values from multiple ranges in a spreadsheet."""
+        try:
+            result = (
+                self.service.spreadsheets()
+                .values()
+                .batchGet(spreadsheetId=spreadsheet_id, ranges=ranges)
+                .execute()
+            )
+            return {
+                range_name: value_range.get("values", [])
+                for range_name, value_range in zip(
+                    ranges, result.get("valueRanges", [])
+                )
+            }
+        except HttpError as error:
+            print(f"An error occurred: {error}")
+            return {}
+
+    def batch_update(self, spreadsheet_id: str, requests: List[Dict]) -> bool:
+        """Batch update operations on a spreadsheet."""
+        try:
+            body = {"requests": requests}
+            self.service.spreadsheets().batchUpdate(
+                spreadsheetId=spreadsheet_id, body=body
+            ).execute()
+            return True
+        except HttpError as error:
+            print(f"An error occurred: {error}")
+            return False
+
+    def create_spreadsheet(self, title: str) -> str:
+        """Create a new spreadsheet."""
+        try:
+            spreadsheet = {"properties": {"title": title}}
+            spreadsheet = (
+                self.service.spreadsheets()
+                .create(body=spreadsheet, fields="spreadsheetId")
+                .execute()
+            )
+            return spreadsheet.get("spreadsheetId")
+        except HttpError as error:
+            print(f"An error occurred: {error}")
+            return ""

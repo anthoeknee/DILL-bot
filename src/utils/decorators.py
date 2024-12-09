@@ -17,34 +17,58 @@ def can_use(level: PermissionLevel):
     Usage: @can_use(PermissionLevel.OWNER) or @can_use(PermissionLevel.ADMIN)
     """
 
-    async def predicate(ctx):
+    async def predicate(ctx_or_interaction):
         settings = Settings.get()
+
+        # Handle both Context and Interaction objects
+        if isinstance(ctx_or_interaction, commands.Context):
+            author = ctx_or_interaction.author
+
+            async def send_error(msg):
+                await ctx_or_interaction.send(msg)
+        else:  # Interaction
+            author = ctx_or_interaction.user
+
+            async def send_error(msg):
+                await ctx_or_interaction.response.send_message(msg, ephemeral=True)
 
         # Owner check
         if level == PermissionLevel.OWNER:
-            if ctx.author.id != settings.owner_id:
-                await ctx.send("This command can only be used by the bot owner.")
+            if author.id != settings.owner_id:
+                await send_error("This command can only be used by the bot owner.")
                 return False
             return True
 
         # Admin check (includes owner)
         if level == PermissionLevel.ADMIN:
             # Check if user is owner (owners are always admins)
-            if ctx.author.id == settings.owner_id:
+            if author.id == settings.owner_id:
                 return True
 
             # Check if user ID is in admin list
-            if ctx.author.id in settings.admin_user_ids:
+            if author.id in settings.admin_user_ids:
                 return True
 
             # Check if user has any admin roles
-            user_roles = [role.id for role in ctx.author.roles]
+            user_roles = [role.id for role in author.roles]
             if any(role_id in settings.admin_role_ids for role_id in user_roles):
                 return True
 
-            await ctx.send("This command requires admin privileges.")
+            await send_error("This command requires admin privileges.")
             return False
 
         return False  # Invalid permission level
 
-    return commands.check(predicate)
+    def decorator(func):
+        if isinstance(func, commands.Command):
+            return commands.check(predicate)(func)
+        else:
+
+            @wraps(func)
+            async def wrapper(self, interaction, *args, **kwargs):
+                if await predicate(interaction):
+                    return await func(self, interaction, *args, **kwargs)
+
+            return wrapper
+
+    return decorator

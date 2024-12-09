@@ -4,3 +4,5 @@ __pycache__/
 docs/
 .vscode/
 logs/
+.copilot-instructions.md
+data/*

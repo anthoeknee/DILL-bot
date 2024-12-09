@@ -2,6 +2,10 @@
 from pathlib import Path
 from pydantic_settings import BaseSettings
 from src.utils import logger
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from src.core.database import get_db
 
 
 class DatabaseSettings(BaseSettings):
@@ -59,6 +63,17 @@ class Settings:
                 logger.error(f"Failed to load bot settings: {str(e)}")
                 raise
         return cls._instance
+
+    @staticmethod
+    def get_setting(key: str) -> str:
+        from src.core.database import get_db
+        from src.core.database.models import BotSetting
+
+        with get_db() as db:
+            setting = db.query(BotSetting).filter(BotSetting.key == key).first()
+            if setting:
+                return setting.value
+            raise ValueError(f"Setting '{key}' not found")
 
 
 # Export database-only settings for migrations
