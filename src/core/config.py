@@ -1,6 +1,7 @@
 # src/core/config.py
 from pathlib import Path
 from pydantic_settings import BaseSettings
+from src.core.database.models import BotSetting
 from src.utils import logger
 from typing import TYPE_CHECKING
 
@@ -66,9 +67,6 @@ class Settings:
 
     @staticmethod
     def get_setting(key: str) -> str:
-        from src.core.database import get_db
-        from src.core.database.models import BotSetting
-
         with get_db() as db:
             setting = db.query(BotSetting).filter(BotSetting.key == key).first()
             if setting:

@@ -1,7 +1,8 @@
 from pathlib import Path
-from typing import List
+from typing import List, Optional
 
 from discord.ext import commands
+from discord import app_commands
 
 from src.utils.logger import logger
 from src.core.config import Settings
@@ -27,7 +28,7 @@ class FeatureManager:
             if path.is_file() and path.suffix == ".py" and path.name != "__init__.py":
                 # Load individual feature file
                 await self._load_feature_file(path)
-            elif path.is_dir():
+            elif path.is_dir() and path.name != "__pycache__":
                 # Load folder-based feature
                 await self._load_folder_feature(path)
 
@@ -39,7 +40,7 @@ class FeatureManager:
         """Load an individual feature file"""
         try:
             feature_name = file_path.stem
-            module_path = f"src.features.{feature_name}"
+            module_path = f"src.features.{feature_name}.cog"
 
             await self.bot.load_extension(module_path)
             self.loaded_features.append(feature_name)
@@ -53,6 +54,14 @@ class FeatureManager:
         try:
             feature_name = folder_path.name
             cog_file = folder_path / "cog.py"
+
+            # Check if the folder contains more than just an __init__.py file
+            python_files = list(folder_path.glob("*.py"))
+            if len(python_files) == 1 and python_files[0].name == "__init__.py":
+                logger.warning(
+                    f"Feature folder {feature_name} only contains __init__.py and is ignored"
+                )
+                return
 
             if not cog_file.exists():
                 logger.warning(f"Feature folder {feature_name} missing cog.py file")
@@ -91,3 +100,32 @@ class FeatureManager:
         except Exception as e:
             logger.error(f"Failed to reload feature {feature_name}: {str(e)}")
             return False
+
+    def get_loaded_features(self) -> List[str]:
+        """Return a list of loaded feature names."""
+        return self.loaded_features
+
+    async def sync_commands(self, guild_id: Optional[int] = None) -> None:
+        """Syncs slash commands to Discord.
+
+        Args:
+            guild_id (Optional[int]): The ID of the guild to sync commands to.
+                                      If None, syncs globally.
+        """
+        try:
+            if guild_id:
+                # Sync to a specific guild
+                guild = self.bot.get_guild(guild_id)
+                if guild:
+                    self.bot.tree.copy_global_to(guild=guild)
+                    await self.bot.tree.sync(guild=guild)
+                    logger.info(f"Synced commands to guild: {guild.name}")
+                else:
+                    logger.warning(f"Guild not found: {guild_id}")
+            else:
+                # Global sync
+                await self.bot.tree.sync()
+                logger.info("Synced commands globally")
+
+        except Exception as e:
+            logger.error(f"Failed to sync commands: {e}")

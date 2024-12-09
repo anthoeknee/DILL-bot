@@ -3,11 +3,13 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 from .models import Base
-from ..config import Settings
 from contextlib import contextmanager
 
+# Move the database URL to a constant or environment variable
+DATABASE_URL = "sqlite:///data/bot.db"
+
 engine = create_engine(
-    Settings.get_db().database_url,
+    DATABASE_URL,
     connect_args={"check_same_thread": False},
     poolclass=StaticPool,
 )

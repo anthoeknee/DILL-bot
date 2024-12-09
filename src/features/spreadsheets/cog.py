@@ -1,6 +1,6 @@
 import discord
 from discord.ext import commands, tasks
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Tuple, Optional, Dict, List
 from src.utils.decorators import can_use, PermissionLevel
 from src.features.spreadsheets.helpers.google import GoogleSheetsClient
@@ -9,6 +9,7 @@ from src.utils.logger import logger
 from src.core.database.models import ManagedServer, ValidTag
 from src.core.database.database import get_db
 from discord import app_commands
+import asyncio
 
 VALID_YES_EMOJIS = [
     "pickle_yes",
@@ -24,10 +25,16 @@ class SpreadsheetCog(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
         self.settings = Settings.get()
-        self.google_sheets_client = GoogleSheetsClient(
-            credentials_path=str(self.settings.credentials_path),
-            token_path="data/token.json",
-        )
+
+        # Initialize with empty credentials if file doesn't exist yet
+        try:
+            self.google_sheets_client = GoogleSheetsClient(
+                credentials_path=str(self.settings.credentials_path)
+            )
+        except Exception as e:
+            logger.warning(f"Failed to initialize Google Sheets client: {e}")
+            self.google_sheets_client = None
+
         self.check_interval_minutes = 10
 
         # Start background tasks
@@ -37,7 +44,7 @@ class SpreadsheetCog(commands.Cog):
     async def get_server_config(self, guild_id: int) -> Optional[ManagedServer]:
         """Get server configuration from database"""
         with get_db() as db:
-            return (
+            server_config = (
                 db.query(ManagedServer)
                 .filter(
                     ManagedServer.server_id == str(guild_id),
@@ -45,6 +52,8 @@ class SpreadsheetCog(commands.Cog):
                 )
                 .first()
             )
+        logger.debug(f"Retrieved server config for guild {guild_id}: {server_config}")
+        return server_config
 
     async def get_valid_tags(self, guild_id: int) -> Dict[str, List[str]]:
         """Get valid tags for a server"""
@@ -64,20 +73,42 @@ class SpreadsheetCog(commands.Cog):
         if not server_config or thread.parent_id != int(server_config.forum_channel_id):
             return
 
-        valid_tags = await self.get_valid_tags(thread.guild.id)
-        yes_emoji = valid_tags["yes"][0] if valid_tags["yes"] else "✅"
-        no_emoji = valid_tags["no"][0] if valid_tags["no"] else "❌"
-
         try:
+            # Get valid tags but fall back to unicode emojis if none configured
+            valid_tags = await self.get_valid_tags(thread.guild.id)
+
+            # For yes emoji: Try custom emoji first, fall back to ✅
+            yes_emoji = None
+            if valid_tags["yes"]:
+                yes_emoji_name = valid_tags["yes"][0]
+                yes_emoji = discord.utils.get(thread.guild.emojis, name=yes_emoji_name)
+            yes_emoji = yes_emoji or "✅"
+
+            # For no emoji: Try custom emoji first, fall back to ❌
+            no_emoji = None
+            if valid_tags["no"]:
+                no_emoji_name = valid_tags["no"][0]
+                no_emoji = discord.utils.get(thread.guild.emojis, name=no_emoji_name)
+            no_emoji = no_emoji or "❌"
+
             # Add initial reactions
             first_message = await thread.fetch_message(thread.id)
             await first_message.add_reaction(yes_emoji)
             await first_message.add_reaction(no_emoji)
 
-            # Add initial vote tag
-            await self.update_thread_tags(thread, "Initial Vote")
+            # Get available tags
+            forum_channel = thread.parent
+            available_tags = {tag.name: tag for tag in forum_channel.available_tags}
 
-            logger.info(f"Initialized new thread: {thread.name} ({thread.id})")
+            # Add initial vote tag
+            if "Initial Vote" in available_tags:
+                await thread.edit(applied_tags=[available_tags["Initial Vote"]])
+                logger.info(
+                    f"Added Initial Vote tag to thread: {thread.name} ({thread.id})"
+                )
+            else:
+                logger.error(f"Initial Vote tag not found for thread {thread.id}")
+
         except Exception as e:
             logger.error(f"Error initializing thread {thread.id}: {e}")
 
@@ -85,17 +116,34 @@ class SpreadsheetCog(commands.Cog):
     async def check_votes(self):
         """Periodically check votes on active threads"""
         try:
-            channel = self.bot.get_channel(self.forum_channel_id)
-            if not channel:
-                logger.error("Could not find forum channel")
-                return
+            # Process each configured server
+            with get_db() as db:
+                servers = (
+                    db.query(ManagedServer)
+                    .filter(ManagedServer.enabled.is_(True))
+                    .all()
+                )
 
-            async for thread in channel.archived_threads(limit=None):
-                await self.process_thread_votes(thread)
+            for server in servers:
+                channel = self.bot.get_channel(int(server.forum_channel_id))
+                if not channel:
+                    logger.error(
+                        f"Could not find forum channel for server {server.server_id}"
+                    )
+                    continue
 
-            # Check active threads
-            async for thread in channel.threads():
-                await self.process_thread_votes(thread)
+                # Process threads that are at least 24 hours old
+                cutoff_time = datetime.utcnow() - timedelta(hours=24)
+
+                # Process archived threads
+                async for thread in channel.archived_threads(limit=None):
+                    if thread.created_at <= cutoff_time:
+                        await self.process_thread_votes(thread)
+
+                # Process active threads
+                async for thread in channel.threads():
+                    if thread.created_at <= cutoff_time:
+                        await self.process_thread_votes(thread)
 
         except Exception as e:
             logger.error(f"Error in check_votes: {e}")
@@ -104,12 +152,21 @@ class SpreadsheetCog(commands.Cog):
     async def process_backlog(self):
         """Process historical threads once per day"""
         try:
-            channel = self.bot.get_channel(self.forum_channel_id)
-            if not channel:
-                return
+            # Process each configured server
+            with get_db() as db:
+                servers = (
+                    db.query(ManagedServer)
+                    .filter(ManagedServer.enabled.is_(True))
+                    .all()
+                )
 
-            async for thread in channel.archived_threads(limit=None):
-                await self.process_thread_votes(thread)
+            for server in servers:
+                channel = self.bot.get_channel(int(server.forum_channel_id))
+                if not channel:
+                    continue
+
+                async for thread in channel.archived_threads(limit=None):
+                    await self.process_thread_votes(thread)
 
         except Exception as e:
             logger.error(f"Error processing backlog: {e}")
@@ -117,6 +174,11 @@ class SpreadsheetCog(commands.Cog):
     async def process_thread_votes(self, thread: discord.Thread):
         """Process votes for a single thread"""
         try:
+            # Check if thread is at least 24 hours old
+            time_since_creation = datetime.utcnow() - thread.created_at
+            if time_since_creation < timedelta(hours=24):
+                return
+
             yes_votes, no_votes = await self.count_votes(thread)
             total_votes = yes_votes + no_votes
 
@@ -126,33 +188,26 @@ class SpreadsheetCog(commands.Cog):
             yes_ratio = yes_votes / total_votes
             current_tags = [tag.name for tag in thread.applied_tags]
 
-            # Determine new tag based on vote ratio
-            new_tag = "Added to list" if yes_ratio > 0.5 else "Not added to list"
+            # Only process if "Initial Vote" tag is present
+            if "Initial Vote" not in current_tags:
+                return
 
-            # Check if tag has changed
-            old_tag = next(
-                (
-                    tag
-                    for tag in ["Added to list", "Not added to list"]
-                    if tag in current_tags
-                ),
-                None,
-            )
-
-            if old_tag and old_tag != new_tag:
-                # Vote ratio has flipped, notify owners
-                await self.notify_owners(
-                    f"Vote ratio has flipped for thread '{thread.name}' ({thread.jump_url})\n"
-                    f"New ratio: {yes_votes}/{total_votes} votes ({yes_ratio:.2%})\n"
-                    f"Status changed from '{old_tag}' to '{new_tag}'"
-                )
+            # Determine new tag based on vote ratio (using 50.01% threshold)
+            new_tag = "Added to List" if yes_ratio > 0.5001 else "Not in Any List"
 
             # Update tags
             await self.update_thread_tags(thread, new_tag)
 
             # Update spreadsheet if necessary
-            if new_tag == "Added to list":
+            if new_tag == "Added to List":
                 await self.add_to_spreadsheet(thread)
+
+            # Notify about the tag change
+            await self.notify_owners(
+                f"Thread '{thread.name}' ({thread.jump_url}) has been processed after 24 hours:\n"
+                f"Final ratio: {yes_votes}/{total_votes} votes ({yes_ratio:.2%})\n"
+                f"Status: {new_tag}"
+            )
 
         except Exception as e:
             logger.error(f"Error processing thread {thread.id}: {e}")
@@ -161,14 +216,24 @@ class SpreadsheetCog(commands.Cog):
         """Count yes and no votes in a thread"""
         try:
             first_message = await thread.fetch_message(thread.id)
+            logger.debug(f"Counting votes for thread {thread.id}")
+            logger.debug(
+                f"Reactions: {[str(r.emoji) for r in first_message.reactions]}"
+            )
             yes_votes = 0
             no_votes = 0
 
             for reaction in first_message.reactions:
-                emoji_name = str(reaction.emoji)
-                if emoji_name in VALID_YES_EMOJIS:
+                # Get the actual emoji name or unicode character
+                if isinstance(reaction.emoji, str):
+                    emoji_name = reaction.emoji
+                else:
+                    emoji_name = reaction.emoji.name.lower()
+
+                # Check both custom emoji names and unicode emojis
+                if emoji_name in VALID_YES_EMOJIS or emoji_name == "✅":
                     yes_votes += reaction.count - 1  # Subtract bot's reaction
-                elif emoji_name in VALID_NO_EMOJIS:
+                elif emoji_name in VALID_NO_EMOJIS or emoji_name == "❌":
                     no_votes += reaction.count - 1  # Subtract bot's reaction
 
             return yes_votes, no_votes
@@ -192,8 +257,7 @@ class SpreadsheetCog(commands.Cog):
             current_tags = [
                 tag
                 for tag in thread.applied_tags
-                if tag.name
-                not in ["Added to list", "Not added to list", "Initial Vote"]
+                if tag.name not in ["Added to List", "Not in Any List", "Initial Vote"]
             ]
 
             # Add new tag
@@ -201,6 +265,7 @@ class SpreadsheetCog(commands.Cog):
 
             # Update thread tags
             await thread.edit(applied_tags=current_tags)
+            logger.info(f"Updated tags for thread {thread.id}: {new_tag}")
 
         except Exception as e:
             logger.error(f"Error updating tags for thread {thread.id}: {e}")
@@ -208,25 +273,34 @@ class SpreadsheetCog(commands.Cog):
     async def add_to_spreadsheet(self, thread: discord.Thread):
         """Add thread information to the spreadsheet"""
         try:
+            # Get server config to get spreadsheet ID
+            server_config = await self.get_server_config(thread.guild.id)
+            if not server_config:
+                logger.error(f"No server config found for thread {thread.id}")
+                return
+
             # Get thread information
             first_message = await thread.fetch_message(thread.id)
+            yes_votes, no_votes = await self.count_votes(thread)
+            total_votes = yes_votes + no_votes
+            vote_ratio = yes_votes / total_votes if total_votes > 0 else 0
 
-            # Prepare row data
+            # Prepare row data (starting from column B)
             row_data = [
                 [
-                    datetime.now().strftime("%Y-%m-%d %H:%M:%S"),  # Timestamp
-                    thread.name,  # Thread Title
-                    first_message.content,  # Content
-                    thread.jump_url,  # Thread URL
-                    str(thread.owner),  # Author
-                    thread.owner.id,  # Author ID
+                    thread.name,  # Level Name (B)
+                    first_message.content,  # Post Description (C)
+                    str(yes_votes),  # Yes Votes (D)
+                    str(no_votes),  # No Votes (E)
+                    f"{vote_ratio:.2%}",  # Ratio (F)
+                    thread.created_at.strftime("%Y-%m-%d"),  # Date Posted (G)
                 ]
             ]
 
-            # Append to spreadsheet
+            # Append to spreadsheet starting at B2
             success = self.google_sheets_client.append_rows(
-                spreadsheet_id=self.spreadsheet_id,
-                range_name=f"{self.sheet_name}!A:F",
+                spreadsheet_id=server_config.spreadsheet_id,
+                range_name="B2:G2",  # Specify range starting at B2
                 values=row_data,
             )
 
@@ -278,24 +352,79 @@ class SpreadsheetCog(commands.Cog):
         name="add_server", description="Add a server to the bot's management"
     )
     @app_commands.describe(
-        forum_channel="The forum channel", spreadsheet_id="The spreadsheet ID"
+        forum_channel="The forum channel",
+        spreadsheet_id="The Google Sheets spreadsheet ID",
     )
     @can_use(PermissionLevel.ADMIN)
     async def add_server(
         self,
         interaction: discord.Interaction,
-        forum_channel: discord.TextChannel,
+        forum_channel: discord.ForumChannel,
         spreadsheet_id: str,
     ):
-        with get_db() as db:
-            server = ManagedServer(
-                server_id=str(interaction.guild.id),
-                forum_channel_id=str(forum_channel.id),
-                spreadsheet_id=spreadsheet_id,
+        """Add a server to the bot's management with spreadsheet validation"""
+        await interaction.response.defer(thinking=True)
+
+        # Validate spreadsheet ID
+        if not self.google_sheets_client:
+            await interaction.followup.send(
+                "❌ Google Sheets integration is not properly configured."
             )
-            db.add(server)
-            db.commit()
-        await interaction.response.send_message("✅ Server added successfully!")
+            return
+
+        try:
+            # Validate spreadsheet ID first
+            is_valid = await self.google_sheets_client.validate_spreadsheet_id(
+                spreadsheet_id
+            )
+            if not is_valid:
+                await interaction.followup.send(
+                    "❌ Invalid spreadsheet ID. Please make sure:\n"
+                    "1. The spreadsheet ID is correct\n"
+                    "2. The bot's service account has access to the spreadsheet"
+                )
+                return
+
+            with get_db() as db:
+                # Check if server already exists
+                existing = (
+                    db.query(ManagedServer)
+                    .filter(
+                        ManagedServer.server_id == str(interaction.guild_id)
+                    )  # Changed from guild.id
+                    .first()
+                )
+
+                if existing:
+                    existing.forum_channel_id = str(forum_channel.id)
+                    existing.spreadsheet_id = spreadsheet_id
+                    existing.enabled = True
+                    db.commit()
+                    await interaction.followup.send(
+                        "✅ Server configuration updated successfully!"
+                    )
+                    return
+
+                # Create new server entry
+                server = ManagedServer(
+                    server_id=str(interaction.guild_id),  # Changed from guild.id
+                    forum_channel_id=str(forum_channel.id),
+                    spreadsheet_id=spreadsheet_id,
+                    enabled=True,
+                )
+                db.add(server)
+                db.commit()
+
+                logger.info(
+                    f"Added new server: {server.server_id} with channel {server.forum_channel_id}"
+                )
+                await interaction.followup.send("✅ Server added successfully!")
+
+        except Exception as e:
+            logger.error(f"Error adding server: {e}", exc_info=True)
+            await interaction.followup.send(
+                "❌ An error occurred while adding the server. Please check the logs."
+            )
 
     @app_commands.command(
         name="remove_server", description="Remove this server from the bot's management"
@@ -377,6 +506,148 @@ class SpreadsheetCog(commands.Cog):
                 )
 
         await interaction.response.send_message(embed=embed)
+
+    async def process_thread_data(self, thread: discord.Thread):
+        """Process a single thread and return its data"""
+        try:
+            yes_votes, no_votes = await self.count_votes(thread)
+            total_votes = yes_votes + no_votes
+            vote_ratio = yes_votes / total_votes if total_votes > 0 else 0
+
+            first_message = await thread.fetch_message(thread.id)
+
+            return {
+                "name": thread.name,
+                "content": first_message.content,
+                "yes_votes": str(yes_votes),
+                "no_votes": str(no_votes),
+                "ratio": f"{vote_ratio:.2%}",
+                "created_at": thread.created_at,
+                "row_data": [
+                    thread.name,
+                    first_message.content,
+                    str(yes_votes),
+                    str(no_votes),
+                    f"{vote_ratio:.2%}",
+                    thread.created_at.strftime("%Y-%m-%d"),
+                ],
+            }
+        except Exception as e:
+            logger.error(f"Error processing thread {thread.id}: {e}")
+            return None
+
+    @app_commands.command(
+        name="sync_spreadsheet", description="Sync all forum threads to the spreadsheet"
+    )
+    @can_use(PermissionLevel.ADMIN)
+    async def sync_spreadsheet(self, interaction: discord.Interaction):
+        """Manually sync all forum threads to the spreadsheet (admin only)"""
+        await interaction.response.defer(thinking=True)
+
+        try:
+            server_config = await self.get_server_config(interaction.guild.id)
+            if not server_config:
+                await interaction.followup.send(
+                    "This server is not configured for spreadsheet management."
+                )
+                return
+
+            channel = self.bot.get_channel(int(server_config.forum_channel_id))
+            if not channel or not isinstance(channel, discord.ForumChannel):
+                await interaction.followup.send(
+                    "Could not find the configured forum channel."
+                )
+                return
+
+            # Collect all threads in a single list
+            progress_msg = await interaction.followup.send("Collecting threads...")
+            all_threads = []
+            all_threads.extend([t for t in channel.threads])
+
+            # Fetch archived threads in larger batches
+            async for thread in channel.archived_threads(limit=None):
+                all_threads.append(thread)
+
+            await progress_msg.edit(content=f"Processing {len(all_threads)} threads...")
+
+            # Process threads in larger batches with concurrent execution
+            BATCH_SIZE = 50
+            all_data = []
+
+            for i in range(0, len(all_threads), BATCH_SIZE):
+                batch = all_threads[i : i + BATCH_SIZE]
+
+                # Process each batch concurrently
+                tasks = []
+                for thread in batch:
+                    # Fetch first message and reactions concurrently
+                    tasks.append(
+                        asyncio.gather(
+                            thread.fetch_message(thread.id), self.count_votes(thread)
+                        )
+                    )
+
+                # Wait for all tasks in batch to complete
+                batch_results = await asyncio.gather(*tasks)
+
+                # Process results
+                for thread, (message, (yes_votes, no_votes)) in zip(
+                    batch, batch_results
+                ):
+                    total_votes = yes_votes + no_votes
+                    vote_ratio = yes_votes / total_votes if total_votes > 0 else 0
+
+                    all_data.append(
+                        {
+                            "created_at": thread.created_at,
+                            "row_data": [
+                                thread.name,
+                                message.content,
+                                str(yes_votes),
+                                str(no_votes),
+                                f"{vote_ratio:.2%}",
+                                thread.created_at.strftime("%Y-%m-%d"),
+                            ],
+                        }
+                    )
+
+                await progress_msg.edit(
+                    content=f"Processed {min(i + BATCH_SIZE, len(all_threads))}/{len(all_threads)} threads..."
+                )
+
+            # Sort by creation date
+            all_data.sort(key=lambda x: x["created_at"], reverse=True)
+            batch_data = [data["row_data"] for data in all_data]
+
+            await progress_msg.edit(content="Updating spreadsheet...")
+
+            # Batch update spreadsheet in a single API call
+            if batch_data:
+                success = self.google_sheets_client.batch_update_values(
+                    spreadsheet_id=server_config.spreadsheet_id, data=batch_data
+                )
+
+                if success:
+                    # Set column widths after updating data
+                    self.google_sheets_client.set_column_widths(
+                        spreadsheet_id=server_config.spreadsheet_id
+                    )
+
+                    await progress_msg.edit(
+                        content=f"✅ Successfully synced {len(batch_data)} threads to the spreadsheet!"
+                    )
+                else:
+                    await progress_msg.edit(
+                        content="❌ Failed to write data to the spreadsheet."
+                    )
+            else:
+                await progress_msg.edit(content="No threads found to sync.")
+
+        except Exception as e:
+            logger.error(f"Error in sync_spreadsheet: {e}")
+            await interaction.followup.send(
+                "❌ An error occurred while syncing the spreadsheet."
+            )
 
 
 async def setup(bot: commands.Bot):

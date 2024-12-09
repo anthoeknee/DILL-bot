@@ -1,8 +1,7 @@
 import os.path
 from typing import List, Any, Dict
 from google.auth.transport.requests import Request
-from google.oauth2.credentials import Credentials
-from google_auth_oauthlib.flow import InstalledAppFlow
+from google.oauth2.service_account import Credentials
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 
@@ -11,32 +10,20 @@ class GoogleSheetsClient:
     # Update scope to allow read and write operations
     SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
 
-    def __init__(
-        self, credentials_path: str = "credentials.json", token_path: str = "token.json"
-    ):
+    def __init__(self, credentials_path: str = "data/g.json"):
         self.credentials_path = credentials_path
-        self.token_path = token_path
         self.service = self._authenticate()
 
     def _authenticate(self):
-        """Handles authentication with Google Sheets API."""
-        creds = None
-        if os.path.exists(self.token_path):
-            creds = Credentials.from_authorized_user_file(self.token_path, self.SCOPES)
-
-        if not creds or not creds.valid:
-            if creds and creds.expired and creds.refresh_token:
-                creds.refresh(Request())
-            else:
-                flow = InstalledAppFlow.from_client_secrets_file(
-                    self.credentials_path, self.SCOPES
-                )
-                creds = flow.run_local_server(port=0)
-
-            with open(self.token_path, "w") as token:
-                token.write(creds.to_json())
-
-        return build("sheets", "v4", credentials=creds)
+        """Handles authentication with Google Sheets API using a service account."""
+        try:
+            creds = Credentials.from_service_account_file(
+                self.credentials_path, scopes=self.SCOPES
+            )
+            return build("sheets", "v4", credentials=creds)
+        except Exception as e:
+            print(f"An error occurred during authentication: {e}")
+            return None
 
     def read_range(self, spreadsheet_id: str, range_name: str) -> List[List[Any]]:
         """
@@ -182,3 +169,118 @@ class GoogleSheetsClient:
         except HttpError as error:
             print(f"An error occurred: {error}")
             return ""
+
+    async def validate_spreadsheet_id(self, spreadsheet_id: str) -> bool:
+        """
+        Validate if a spreadsheet ID exists and is accessible.
+
+        Args:
+            spreadsheet_id: The ID of the spreadsheet to validate
+
+        Returns:
+            Boolean indicating if the spreadsheet is valid and accessible
+        """
+        try:
+            # Try to get spreadsheet metadata
+            self.service.spreadsheets().get(spreadsheetId=spreadsheet_id).execute()
+            return True
+        except HttpError as error:
+            if error.resp.status == 404:
+                print(f"Spreadsheet {spreadsheet_id} not found")
+            else:
+                print(f"Error validating spreadsheet: {error}")
+            return False
+
+    def batch_update_values(self, spreadsheet_id: str, data: List[List[Any]]) -> bool:
+        """
+        Batch update values in a spreadsheet using a single API call.
+        """
+        try:
+            # Clear existing content first
+            self.clear_range(spreadsheet_id, "B2:G")
+
+            # Prepare the batch update request for values only
+            batch_data = []
+            for i, row in enumerate(data, start=2):
+                batch_data.append({"range": f"B{i}:G{i}", "values": [row]})
+
+            # Update values
+            body = {"valueInputOption": "RAW", "data": batch_data}
+            self.service.spreadsheets().values().batchUpdate(
+                spreadsheetId=spreadsheet_id, body=body
+            ).execute()
+
+            # Apply formatting in a separate request
+            format_request = [
+                {
+                    "repeatCell": {
+                        "range": {
+                            "sheetId": 0,
+                            "startRowIndex": 1,
+                            "startColumnIndex": 2,  # Column C
+                            "endColumnIndex": 3,  # Column C
+                        },
+                        "cell": {
+                            "userEnteredFormat": {
+                                "horizontalAlignment": "LEFT",
+                                "wrapStrategy": "WRAP",
+                            }
+                        },
+                        "fields": "userEnteredFormat(horizontalAlignment,wrapStrategy)",
+                    }
+                }
+            ]
+
+            self.service.spreadsheets().batchUpdate(
+                spreadsheetId=spreadsheet_id, body={"requests": format_request}
+            ).execute()
+
+            return True
+
+        except HttpError as error:
+            print(f"An error occurred: {error}")
+            return False
+
+    def set_column_widths(self, spreadsheet_id: str) -> bool:
+        """Set optimal column widths for better readability"""
+        try:
+            requests = [
+                {
+                    "updateDimensionProperties": {
+                        "range": {
+                            "sheetId": 0,
+                            "dimension": "COLUMNS",
+                            "startIndex": 1,  # Column B
+                            "endIndex": 2,  # Column B
+                        },
+                        "properties": {
+                            "pixelSize": 250  # Level Name width
+                        },
+                        "fields": "pixelSize",
+                    }
+                },
+                {
+                    "updateDimensionProperties": {
+                        "range": {
+                            "sheetId": 0,
+                            "dimension": "COLUMNS",
+                            "startIndex": 2,  # Column C
+                            "endIndex": 3,  # Column C
+                        },
+                        "properties": {
+                            "pixelSize": 400  # Post Description width
+                        },
+                        "fields": "pixelSize",
+                    }
+                },
+            ]
+
+            body = {"requests": requests}
+            self.service.spreadsheets().batchUpdate(
+                spreadsheetId=spreadsheet_id, body=body
+            ).execute()
+            return True
+
+        except HttpError as error:
+            print(f"An error occurred: {error}")
+            return False

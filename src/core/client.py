@@ -20,6 +20,7 @@ class DiscordBot(commands.Bot):
             command_prefix=self.settings.command_prefix,
             intents=intents,
             owner_id=self.settings.owner_id,
+            help_command=None,  # Remove default help command
         )
 
         self.feature_manager: Optional[FeatureManager] = None
@@ -35,6 +36,9 @@ class DiscordBot(commands.Bot):
         # Initialize and load features
         self.feature_manager = FeatureManager(self)
         await self.feature_manager.load_all_features()
+
+        # Sync commands
+        await self.feature_manager.sync_commands()
 
         logger.info("Bot setup completed successfully")
 
