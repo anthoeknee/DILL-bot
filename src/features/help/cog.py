@@ -22,12 +22,6 @@ class HelpCog(commands.Cog):
         if hasattr(cog, "__cog_app_commands__"):
             commands.extend(cog.__cog_app_commands__)
 
-        # Alternative method to get commands
-        for attr in dir(cog):
-            cmd = getattr(cog, attr)
-            if isinstance(cmd, app_commands.Command):
-                commands.append(cmd)
-
         return commands
 
     @app_commands.command(name="help", description="Show help information")

@@ -226,8 +226,14 @@ class SpreadsheetCog(commands.Cog):
                 f"Status: {status}"
             )
 
+        except discord.HTTPException as e:
+            logger.error(f"Error processing votes for thread {thread.id}: {e}")
+            # Add error handling logic here, e.g., retry, notify user, etc.
         except Exception as e:
-            logger.error(f"Error processing thread {thread.id}: {e}")
+            logger.error(
+                f"An unexpected error occurred while processing votes for thread {thread.id}: {e}"
+            )
+            # Handle other potential errors
 
     async def count_votes(self, thread: discord.Thread) -> Tuple[int, int]:
         """Count yes and no votes in a thread"""
@@ -255,9 +261,14 @@ class SpreadsheetCog(commands.Cog):
 
             return yes_votes, no_votes
 
+        except discord.HTTPException as e:
+            logger.error(f"Error counting votes for thread {thread.id}: {e}")
+            # Add error handling logic here
         except Exception as e:
-            logger.error(f"Error counting votes in thread {thread.id}: {e}")
-            return 0, 0
+            logger.error(
+                f"An unexpected error occurred while counting votes for thread {thread.id}: {e}"
+            )
+            # Handle other potential errors
 
     async def update_thread_tags(self, thread: discord.Thread, is_approved: bool):
         """Update thread tags using tag IDs"""
@@ -294,8 +305,14 @@ class SpreadsheetCog(commands.Cog):
             await thread.edit(applied_tags=current_tags)
             logger.info(f"Updated tags for thread {thread.id}")
 
-        except Exception as e:
+        except discord.HTTPException as e:
             logger.error(f"Error updating tags for thread {thread.id}: {e}")
+            # Add error handling logic here
+        except Exception as e:
+            logger.error(
+                f"An unexpected error occurred while updating tags for thread {thread.id}: {e}"
+            )
+            # Handle other potential errors
 
     async def add_to_spreadsheet(self, thread: discord.Thread):
         """Add thread information to the spreadsheet"""
@@ -356,8 +373,12 @@ class SpreadsheetCog(commands.Cog):
                 except Exception as e:
                     logger.error(f"Failed to notify admin {admin_id}: {e}")
 
+        except discord.HTTPException as e:
+            logger.error(f"Error notifying owners: {e}")
+            # Add error handling logic here
         except Exception as e:
-            logger.error(f"Error in notify_owners: {e}")
+            logger.error(f"An unexpected error occurred in notify_owners: {e}")
+            # Handle other potential errors
 
     @commands.command()
     @can_use(PermissionLevel.OWNER)
@@ -810,7 +831,15 @@ class SpreadsheetCog(commands.Cog):
                 )
 
             for server in servers:
-                if not server.notification_channel_id:
+                # Skip if notification channel or tag IDs aren't configured
+                if not (
+                    server.notification_channel_id
+                    and server.added_to_list_tag_id
+                    and server.not_in_list_tag_id
+                ):
+                    logger.debug(
+                        f"Skipping server {server.server_id} - missing configuration"
+                    )
                     continue
 
                 channel = self.bot.get_channel(int(server.forum_channel_id))
@@ -819,19 +848,57 @@ class SpreadsheetCog(commands.Cog):
                 )
 
                 if not channel or not notification_channel:
+                    logger.error(
+                        f"Could not find channels for server {server.server_id}"
+                    )
                     continue
 
                 # Process both active and archived threads
                 threads = []
-                threads.extend([t for t in channel.threads])
-                async for thread in channel.archived_threads(limit=None):
-                    threads.append(thread)
+                try:
+                    # Get active threads
+                    threads.extend([t for t in channel.threads])
 
-                for thread in threads:
-                    await self.check_thread_ratio(thread, server, notification_channel)
+                    # Get archived threads
+                    async for thread in channel.archived_threads(limit=None):
+                        threads.append(thread)
+
+                    logger.info(
+                        f"Processing {len(threads)} threads for server {server.server_id}"
+                    )
+
+                    # Process threads in smaller batches to avoid rate limits
+                    BATCH_SIZE = 10
+                    for i in range(0, len(threads), BATCH_SIZE):
+                        batch = threads[i : i + BATCH_SIZE]
+                        for thread in batch:
+                            try:
+                                await self.check_thread_ratio(
+                                    thread, server, notification_channel
+                                )
+                            except Exception as thread_error:
+                                logger.error(
+                                    f"Error processing thread {thread.id}: {thread_error}"
+                                )
+                        # Add small delay between batches to avoid rate limits
+                        await asyncio.sleep(2)
+
+                except discord.HTTPException as e:
+                    logger.error(
+                        f"Discord API error while processing server {server.server_id}: {e}"
+                    )
+                except Exception as e:
+                    logger.error(
+                        f"Error processing threads for server {server.server_id}: {e}"
+                    )
 
         except Exception as e:
             logger.error(f"Error in check_ratios: {e}")
+
+    @check_ratios.before_loop
+    async def before_check_ratios(self):
+        """Wait until the bot is ready before starting the task"""
+        await self.bot.wait_until_ready()
 
     async def check_thread_ratio(
         self,
