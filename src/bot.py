@@ -3,7 +3,6 @@ import json
 import discord
 from discord.ext import commands, tasks
 from src.config import load_config, ConfigManager
-from src.settings import SettingsCog
 from src.utils import requires_configuration
 from src.spreadsheets import SpreadsheetService
 import logging
@@ -44,7 +43,7 @@ class CredentialsModal(ui.Modal, title="Set Google Credentials"):
             )
 
 
-class DiscordBot:
+class DiscordBot(commands.Cog):
     def __init__(
         self,
         base_bot: commands.Bot,
@@ -59,14 +58,17 @@ class DiscordBot:
         self.background_task_running = False
         logging.info("DiscordBot initialized.")
 
+    @commands.Cog.listener()
     async def on_ready(self):
-        logging.info(f"Logged in as {self.bot.user.name}")
-        await self.check_and_initialize()
+        try:
+            logging.info(f"Logged in as {self.bot.user.name}")
+            await self.bot.tree.sync(guild=discord.Object(id=self.sync_guild_id))
+            logging.info(f"Synced commands to guild {self.sync_guild_id}")
+        except Exception as e:
+            logging.error(f"Error in on_ready: {e}")
 
     async def setup_hook(self):
         logging.info("Setting up bot commands and cogs.")
-        await self._register_commands()
-        await self.bot.add_cog(SettingsCog(self))
         await self.check_and_initialize()
 
     async def check_and_initialize(self):
@@ -87,22 +89,11 @@ class DiscordBot:
         logging.info("Closing bot and database session.")
         if self.background_task_running:
             self.sync_thread_tags.cancel()
-        self.session.close()
         await super().close()
 
     async def sync_all_threads(self, ctx):
         logging.info(f"Syncing all threads for server {ctx.guild.id}.")
         await self.spreadsheet_service.sync_all_threads(ctx)
-
-    async def _register_commands(self):
-        logging.info("Registering bot commands as slash commands.")
-        for command in self.commands:
-            if not command.name == "help":
-                self.tree.command(
-                    name=command.name,
-                    description=command.help or "No description provided",
-                )(command.callback)
-        await self.tree.sync()
 
     async def _initialize_default_config(self):
         logging.info("Initializing default configuration if none exists.")

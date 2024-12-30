@@ -1,6 +1,7 @@
 # start.py
 import logging
 import os
+import asyncio
 
 import discord
 import dotenv
@@ -14,6 +15,7 @@ from sqlalchemy.orm import sessionmaker
 from src.bot import DiscordBot
 from src.models import Base
 from src.config import ConfigManager, load_config
+from src.settings import SettingsCog
 
 dotenv.load_dotenv()
 
@@ -57,8 +59,8 @@ def setup_database() -> Engine:
     return engine
 
 
-def main():
-    """Main function to run the bot."""
+async def setup_bot():
+    """Sets up the bot, loads cogs, but does not start the bot."""
     setup_logging()
     engine = setup_database()
     Session = sessionmaker(bind=engine)
@@ -69,23 +71,31 @@ def main():
     intents.message_content = True
     intents.members = True
 
-    # Create a commands.Bot instance with help_command=None
     base_bot = commands.Bot(
         command_prefix=commands.when_mentioned_or(load_config()["bot"]["prefix"]),
         intents=intents,
-        help_command=None,  # Disable default help command here
+        help_command=None,
     )
 
-    # Pass the commands.Bot instance to your DiscordBot (no need to assign to a variable)
-    DiscordBot(
+    discord_bot = DiscordBot(
         base_bot=base_bot,
         config_manager=config_manager,
         session=session,
     )
 
-    # Run the bot using the commands.Bot instance
-    base_bot.run(load_config()["bot"]["token"])
+    await base_bot.add_cog(SettingsCog(discord_bot))
+    await base_bot.add_cog(discord_bot)
+
+    return base_bot
 
 
 if __name__ == "__main__":
-    main()
+    logging.info("Starting bot setup...")
+    base_bot = asyncio.run(setup_bot())
+    logging.info("Bot setup complete.")
+
+    logging.info("Running bot...")
+    base_bot.run(load_config()["bot"]["token"])
+    logging.info(
+        "Bot has stopped."
+    )  # This will only be reached when the bot is stopped

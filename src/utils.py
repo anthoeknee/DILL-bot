@@ -18,12 +18,6 @@ config = load_config()
 engine = create_engine(config["database"]["url"])
 
 
-def get_session():
-    """Creates and returns a new database session."""
-    logging.info("Creating new database session.")
-    return Session(bind=engine)
-
-
 async def is_discord_id(bot: discord.Client, discord_id: str) -> tuple[bool, str]:
     """
     Checks if a given ID is a valid Discord ID and returns its type.
@@ -113,8 +107,6 @@ def requires_configuration():
                     f"Error during configuration check for command '{func.__name__}' on server {ctx.guild.id}: {e}"
                 )
                 await ctx.send("An error occurred while checking the configuration.")
-            finally:
-                session.close()
 
         return wrapper
 
