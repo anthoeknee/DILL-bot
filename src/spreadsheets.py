@@ -5,11 +5,13 @@ from src.config import load_config, ConfigManager
 from src.utils import load_google_credentials
 import logging
 import discord
-from typing import List, Dict, Optional
+from typing import List, Dict, Optional, Set
 from sqlalchemy.orm import Session
 from src.models import ServerConfig, Thread, Tag
 import json
 from discord.ext import commands
+from datetime import datetime
+import asyncio
 
 # Configure logging
 logging.basicConfig(
@@ -26,6 +28,8 @@ class SpreadsheetService:
         self.config_manager = ConfigManager(session)
         self.service = None
         logging.info("SpreadsheetService initialized.")
+        self.notification_channel_id = 1260691801577099295
+        self.last_thread_states = {}  # Store previous vote states
 
     async def initialize_google_api(self, server_id: Optional[str] = None):
         logging.info("Initializing Google Sheets API.")
@@ -38,7 +42,7 @@ class SpreadsheetService:
                 "No server config found, cannot initialize Google Sheets API."
             )
             return False
-        credentials = server_config.get_google_credentials()
+        credentials = self.config_manager.get_google_credentials()
         if not credentials:
             logging.error(
                 "No google credentials found, cannot initialize Google Sheets API."
@@ -57,57 +61,137 @@ class SpreadsheetService:
         logging.info("Initializing SpreadsheetService.")
         return await self.initialize_google_api()
 
-    async def sync_all_threads(self, guild: discord.Guild):
+    async def sync_all_threads(
+        self, guild: discord.Guild, progress_message: discord.Message
+    ):
+        """Synchronize all threads in the guild's forum channel with the spreadsheet"""
         logging.info(f"Syncing all threads for guild: {guild.id}")
-        server_config = self.config_manager.get_config(str(guild.id))
-        if not server_config or not server_config.is_configured:
-            logging.warning(f"Server {guild.id} is not configured, skipping sync.")
-            return
-        if not server_config.forum_channel_id:
-            logging.warning(
-                f"Forum channel ID is not set for server {guild.id}, skipping sync."
-            )
-            return
-        forum_channel = self.bot.get_channel(int(server_config.forum_channel_id))
-        if not forum_channel:
-            logging.error(
-                f"Forum channel with ID {server_config.forum_channel_id} not found for server {guild.id}."
-            )
-            return
-        threads = [thread for thread in forum_channel.threads if not thread.archived]
+
+        # Initialize Google Sheets API first
+        if not await self.initialize_google_api(str(guild.id)):
+            raise ValueError("Failed to initialize Google Sheets API")
+
+        server_config = (
+            self.session.query(ServerConfig).filter_by(server_id=str(guild.id)).first()
+        )
+
+        if not server_config or not server_config.forum_channel_id:
+            raise ValueError("Forum channel not configured")
+
+        channel = guild.get_channel(int(server_config.forum_channel_id))
+        if not isinstance(channel, discord.ForumChannel):
+            raise ValueError("Configured channel is not a forum channel")
+
+        # Get all available tags in the forum
+        available_tags = {tag.name: tag for tag in channel.available_tags}
+
+        # Store whether this is the first sync
+        is_first_sync = not self.last_thread_states
+
+        # Get ALL threads (both active and archived) and sort them by creation date
+        all_threads = []
+        async for thread in channel.archived_threads():
+            all_threads.append(thread)
+        all_threads.extend(channel.threads)
+
+        all_threads.sort(key=lambda x: x.created_at, reverse=True)
+
+        total_threads = len(all_threads)
+
+        if total_threads == 0:
+            return "No threads found to sync."
+
         all_thread_data = []
-        for thread in threads:
-            if (
-                server_config.exempt_threads
-                and str(thread.id) in server_config.exempt_threads
-            ):
-                logging.info(f"Skipping exempt thread: {thread.id}")
-                continue
-            thread_data = await self.process_thread_data(thread, server_config)
-            if thread_data:
-                all_thread_data.append(thread_data)
+        batch_size = 10  # Process 10 threads at a time
+
+        for i in range(0, total_threads, batch_size):
+            batch = all_threads[i : i + batch_size]
+            batch_tasks = []
+
+            for thread in batch:
+                current_tags = set(tag.name for tag in thread.applied_tags)
+                task = self.process_thread_data(
+                    thread=thread,
+                    config=server_config,
+                    available_tags=available_tags,
+                    current_tags=current_tags,
+                    skip_notifications=is_first_sync,
+                )
+                batch_tasks.append(task)
+
+            # Process batch concurrently
+            batch_results = await asyncio.gather(*batch_tasks)
+            all_thread_data.extend([data for data in batch_results if data])
+
+            # Update progress
+            progress = min((i + batch_size) / total_threads * 100, 100)
+            processed = min(i + batch_size, total_threads)
+            progress_status = (
+                f"Processing threads: {processed}/{total_threads} ({progress:.1f}%)"
+            )
+            await progress_message.edit(content=progress_status)
+            logging.info(progress_status)
+
         if all_thread_data:
             await self.update_sheet(all_thread_data, server_config)
-        logging.info(f"Finished syncing all threads for guild: {guild.id}")
+            return f"✅ Sync complete! Processed {len(all_thread_data)} threads."
+        else:
+            return "No thread data was collected to sync."
 
     async def process_thread_data(
-        self, thread: discord.Thread, config: ServerConfig
+        self,
+        thread: discord.Thread,
+        config: ServerConfig,
+        available_tags: Dict[str, discord.ForumTag],
+        current_tags: Set[str],
+        skip_notifications: bool = False,
     ) -> Optional[Dict]:
         logging.info(f"Processing thread data for thread: {thread.id}")
         try:
+            # Skip threads with "Initial Voting" tag
+            if "Initial Voting" in current_tags:
+                return None
+
             first_message = await self.fetch_first_message(thread)
             if not first_message:
                 logging.warning(f"No first message found for thread: {thread.id}")
                 return None
-            thread_data = {
-                "thread_id": str(thread.id),
+
+            # Count reactions
+            yes_count = 0
+            no_count = 0
+            for reaction in first_message.reactions:
+                if isinstance(reaction.emoji, discord.Emoji):
+                    if reaction.emoji.id == int(config.yes_emoji_id):
+                        yes_count = reaction.count - 1
+                    elif reaction.emoji.id == int(config.no_emoji_id):
+                        no_count = reaction.count - 1
+
+            total_votes = yes_count + no_count
+            ratio = (yes_count / total_votes * 100) if total_votes > 0 else 0
+
+            # Skip threads with 50% or less positive votes
+            if ratio <= 50:
+                return None
+
+            thread_id = str(thread.id)
+            prev_ratio = self.last_thread_states.get(thread_id, 0)
+
+            # Only send notification if not skipping notifications and threshold is crossed
+            if not skip_notifications and prev_ratio <= 50 and ratio > 50:
+                await self.send_approval_notification(thread)
+
+            # Always update the last known state
+            self.last_thread_states[thread_id] = ratio
+
+            return {
                 "thread_name": thread.name,
-                "first_message_content": first_message.content,
-                "first_message_author": str(first_message.author.id),
-                "tags": [tag.name for tag in thread.applied_tags],
-                "url": thread.jump_url,
+                "yes_count": yes_count,
+                "no_count": no_count,
+                "tags": ", ".join(current_tags),
+                "ratio": f"{ratio:.2f}%",
+                "date_posted": thread.created_at.strftime("%Y-%m-%d %H:%M:%S"),
             }
-            return thread_data
         except Exception as e:
             logging.error(f"Error processing thread data for thread {thread.id}: {e}")
             return None
@@ -199,34 +283,69 @@ class SpreadsheetService:
             return None
 
     async def update_sheet(self, thread_data: List[Dict], config: ServerConfig):
-        logging.info("Updating Google Sheet with thread data.")
+        logging.info(f"Updating Google Sheet with {len(thread_data)} threads.")
         try:
             if not self.service:
-                logging.error("Google Sheets API not initialized, cannot update sheet.")
+                logging.error("Google Sheets service not initialized")
                 return
-            spreadsheet_id = config.spreadsheet_id
-            if not spreadsheet_id:
-                logging.error("Spreadsheet ID not set, cannot update sheet.")
+
+            if not thread_data:
+                logging.warning("No thread data to update")
                 return
-            sheet = self.service.spreadsheets()
-            values = [list(data.values()) for data in thread_data]
-            header = list(thread_data[0].keys()) if thread_data else []
-            body = [header] + values
-            range_name = "A1"
-            value_input_option = "USER_ENTERED"
-            value_range_body = {"values": body}
-            request = sheet.values().update(
-                spreadsheetId=spreadsheet_id,
-                range=range_name,
-                valueInputOption=value_input_option,
-                body=value_range_body,
+
+            # First, clear all existing data below headers
+            clear_range = "B2:G1000"  # Adjust range as needed
+            try:
+                self.service.spreadsheets().values().clear(
+                    spreadsheetId=config.spreadsheet_id, range=clear_range
+                ).execute()
+                logging.info("Cleared existing spreadsheet data")
+            except Exception as e:
+                logging.error(f"Error clearing spreadsheet: {e}")
+                return
+
+            # Prepare the values starting from B2
+            values = []
+            for data in thread_data:
+                row = [
+                    data["thread_name"],
+                    data["yes_count"],
+                    data["no_count"],
+                    data["tags"],
+                    data["ratio"],
+                    data["date_posted"],
+                ]
+                values.append(row)
+
+            # Update the sheet starting from B2
+            range_name = f"B2:G{len(values) + 1}"
+            body = {"values": values}
+
+            logging.info(
+                f"Attempting to update {len(values)} rows in range {range_name}"
+            )
+
+            request = (
+                self.service.spreadsheets()
+                .values()
+                .update(
+                    spreadsheetId=config.spreadsheet_id,
+                    range=range_name,
+                    valueInputOption="USER_ENTERED",
+                    body=body,
+                )
             )
             response = request.execute()
+
+            updated_cells = response.get("updatedCells", 0)
+            updated_rows = response.get("updatedRows", 0)
             logging.info(
-                f"Google Sheet updated successfully. Updated {response.get('updatedCells', 0)} cells."
+                f"Successfully updated {updated_cells} cells across {updated_rows} rows"
             )
+
         except Exception as e:
-            logging.error(f"Error updating Google Sheet: {e}")
+            logging.error(f"Error updating Google Sheet: {e}", exc_info=True)
+            raise  # Re-raise the exception so the command can catch it
 
     async def autocomplete_channels(
         self, interaction: discord.Interaction, current: str
@@ -283,6 +402,17 @@ class SpreadsheetService:
                 logging.info(f"Added no reaction to thread: {thread.id}")
         except Exception as e:
             logging.error(f"Error managing vote reactions for thread {thread.id}: {e}")
+
+    async def send_approval_notification(self, thread: discord.Thread):
+        """Send notification when a thread crosses 50% approval"""
+        try:
+            channel = self.bot.get_channel(self.notification_channel_id)
+            if channel:
+                await channel.send(
+                    f"🎉 Level **{thread.name}** has reached over 50% approval! {thread.jump_url}"
+                )
+        except Exception as e:
+            logging.error(f"Error sending approval notification: {e}")
 
 
 def get_sheets_service():

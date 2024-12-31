@@ -8,6 +8,7 @@ from google.oauth2 import service_account
 from functools import wraps
 from sqlalchemy import create_engine
 from src.config import load_config
+from discord.ext import commands
 
 # Configure logging
 logging.basicConfig(
@@ -65,52 +66,38 @@ async def is_discord_id(bot: discord.Client, discord_id: str) -> tuple[bool, str
 
 
 def requires_configuration():
-    """
-    Decorator that checks if the bot is configured before running a command.
-    Allows the bot owner to bypass the configuration check.
-    """
-
-    def decorator(func):
+    def wrapper(func):
         @wraps(func)
-        async def wrapper(ctx, *args, **kwargs):
-            # Check if the user is the bot owner or the specified user ID
-            if (
-                await ctx.bot.is_owner(ctx.author)
-                or str(ctx.author.id) == "1114624963169747068"
-            ):
-                logging.info(
-                    f"Bot owner or specified user '{ctx.author}' is bypassing configuration check for command '{func.__name__}'."
-                )
-                return await func(ctx, *args, **kwargs)
+        async def wrapped(cog, ctx, *args, **kwargs):
+            """Check if the bot is configured for the server and user has permission"""
+            if not ctx.guild:
+                await ctx.send("This command can only be used in a server.")
+                return
 
-            session = ctx.bot.session
-            try:
-                config = (
-                    session.query(ServerConfig)
-                    .filter_by(server_id=str(ctx.guild.id))
-                    .first()
-                )
-                if not config or not config.is_configured:
-                    logging.warning(
-                        f"Command '{func.__name__}' requires configuration, but server {ctx.guild.id} is not configured."
-                    )
-                    await ctx.send(
-                        "This command requires the bot to be configured. Please use the `!config` command to set up the bot."
-                    )
-                    return
-                logging.info(
-                    f"Configuration check passed for command '{func.__name__}' on server {ctx.guild.id}."
-                )
-                return await func(ctx, *args, **kwargs)
-            except Exception as e:
-                logging.error(
-                    f"Error during configuration check for command '{func.__name__}' on server {ctx.guild.id}: {e}"
-                )
-                await ctx.send("An error occurred while checking the configuration.")
+            server_id = str(ctx.guild.id)
+            author = ctx.author
 
-        return wrapper
+            # Check if user is bot owner
+            is_owner = await ctx.bot.is_owner(author)
 
-    return decorator
+            config_manager = ctx.bot.config_manager
+            config = config_manager.get_config(server_id)
+
+            if not config or not config.is_configured:
+                await ctx.send(
+                    "Bot is not configured for this server. Please configure it first."
+                )
+                return
+
+            if not config.enabled and not is_owner:
+                await ctx.send("Bot is currently disabled for this server.")
+                return
+
+            return await func(cog, ctx, *args, **kwargs)
+
+        return wrapped
+
+    return wrapper
 
 
 def load_google_credentials(credentials_json: str) -> service_account.Credentials:

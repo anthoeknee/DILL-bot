@@ -9,181 +9,126 @@ import logging
 import os
 from discord import ui
 from sqlalchemy.orm import Session
-
-# Load configuration
-config = load_config()
-
-# Configure logging
-logging.basicConfig(
-    level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s"
-)
+from src.help import HelpCommand
+from typing import Optional, Dict, Set
+from src.settings import SettingsCog
+from src.models import ServerConfig
+from discord import app_commands
 
 
-class CredentialsModal(ui.Modal, title="Set Google Credentials"):
-    credentials = ui.TextInput(
-        label="Google Credentials JSON", style=discord.TextStyle.paragraph
-    )
+class DiscordBot(commands.Cog, name="Bot Management"):
+    """Main bot functionality for spreadsheet synchronization and thread management"""
 
-    def __init__(self, bot, server_id):
-        super().__init__()
-        self.bot = bot
-        self.server_id = server_id
-
-    async def on_submit(self, interaction: discord.Interaction):
-        try:
-            credentials = self.credentials.value
-            await self.bot.set_credentials(self.server_id, credentials)
-            await interaction.response.send_message(
-                "Google credentials set successfully.", ephemeral=True
-            )
-        except Exception as e:
-            logging.error(f"Error setting google credentials: {e}")
-            await interaction.response.send_message(
-                f"Error setting google credentials: {e}", ephemeral=True
-            )
-
-
-class DiscordBot(commands.Cog):
     def __init__(
         self,
         base_bot: commands.Bot,
         config_manager: ConfigManager,
         session: Session,
     ):
+        super().__init__()
         self.bot = base_bot
         self.session = session
         self.config_manager = config_manager
-        self.spreadsheet_service = SpreadsheetService(self.session, self)
-        self.sync_guild_id = int(os.getenv("SYNC_GUILD_ID"))
+        self.spreadsheet_service = SpreadsheetService(self.session, base_bot)
+        self.sync_guild_id = int(os.getenv("SYNC_GUILD_ID", "0"))
         self.background_task_running = False
         logging.info("DiscordBot initialized.")
+        logging.info(f"Commands registered: {[cmd.name for cmd in self.bot.commands]}")
+        # Start the background task
+        self.combined_sync_task.start()
 
     @commands.Cog.listener()
     async def on_ready(self):
+        """Event handler for when the bot is ready"""
         try:
             logging.info(f"Logged in as {self.bot.user.name}")
-            await self.bot.tree.sync(guild=discord.Object(id=self.sync_guild_id))
-            logging.info(f"Synced commands to guild {self.sync_guild_id}")
+            logging.info("Bot is ready!")
         except Exception as e:
             logging.error(f"Error in on_ready: {e}")
 
-    async def setup_hook(self):
-        logging.info("Setting up bot commands and cogs.")
-        await self.check_and_initialize()
-
-    async def check_and_initialize(self):
-        server_config = self.config_manager.get_config(self.sync_guild_id)
-        if server_config and server_config.is_configured:
-            logging.info(
-                "Bot is configured, initializing SpreadsheetService and starting background task."
-            )
-            await self.spreadsheet_service.initialize_google_api()
-            self.sync_thread_tags.start()
-            self.background_task_running = True
-        else:
-            logging.info(
-                "Bot is not configured, skipping SpreadsheetService initialization and background task."
-            )
-
-    async def close(self):
-        logging.info("Closing bot and database session.")
-        if self.background_task_running:
-            self.sync_thread_tags.cancel()
-        await super().close()
-
-    async def sync_all_threads(self, ctx):
-        logging.info(f"Syncing all threads for server {ctx.guild.id}.")
-        await self.spreadsheet_service.sync_all_threads(ctx)
-
-    async def _initialize_default_config(self):
-        logging.info("Initializing default configuration if none exists.")
-        if not self.sync_guild_id:
-            logging.warning(
-                "SYNC_GUILD_ID is not set, skipping default config initialization."
+    @app_commands.command(
+        name="sync", description="Synchronize all threads with the spreadsheet"
+    )
+    async def sync_slash_command(self, interaction: discord.Interaction):
+        """Synchronize all threads in the forum channel with the Google Spreadsheet."""
+        if not (
+            interaction.user.guild_permissions.administrator
+            or await self.bot.is_owner(interaction.user)
+        ):
+            await interaction.response.send_message(
+                "You must be an administrator or the bot owner to use this command.",
+                ephemeral=True,
             )
             return
-        config = self.config_manager.get_config()
-        if not config:
-            spreadsheet_id = os.getenv("DEFAULT_SPREADSHEET_ID")
-            if not spreadsheet_id:
-                logging.warning(
-                    "DEFAULT_SPREADSHEET_ID is not set, skipping default config initialization."
-                )
-                return
-            logging.info(
-                f"Creating default config for server {self.sync_guild_id} with spreadsheet ID {spreadsheet_id}."
+
+        await interaction.response.defer()
+        progress_message = await interaction.followup.send(
+            "Starting synchronization..."
+        )
+
+        try:
+            guild = interaction.guild
+            result = await self.spreadsheet_service.sync_all_threads(
+                guild, progress_message
             )
-            self.config_manager.create_or_update_config(
-                {"server_id": self.sync_guild_id, "spreadsheet_id": spreadsheet_id}
-            )
-            logging.info(
-                f"Default config created for server {self.sync_guild_id} with spreadsheet ID {spreadsheet_id}."
-            )
-        else:
-            logging.info(
-                f"Config already exists for server {self.sync_guild_id}, skipping default config initialization."
+            await progress_message.edit(content=result)
+        except Exception as e:
+            logging.error(f"Error in sync command: {e}", exc_info=True)
+            await progress_message.edit(
+                content=f"❌ An error occurred during synchronization: {str(e)}"
             )
 
-    @commands.command(name="sync", help="Sync all threads with the spreadsheet.")
+    @commands.command(
+        name="sync",
+        help="Synchronize all threads with the spreadsheet",
+        brief="Sync threads with spreadsheet",
+    )
     @requires_configuration()
     async def sync_command(self, ctx):
+        """Legacy sync command using prefix"""
         await self.sync_all_threads(ctx)
+        await ctx.send("Synchronization complete!")
 
-    @commands.command(name="setup", help="Setup the bot for this server.")
-    async def setup_command(self, ctx):
-        logging.info(f"Setting up bot for server {ctx.guild.id}.")
-        await self._initialize_default_config()
-        await ctx.send(
-            "Bot setup complete. Please set the forum channel and google credentials."
-        )
-
-    @commands.command(name="set_spreadsheet", help="Set the spreadsheet ID.")
-    @requires_configuration()
-    async def set_spreadsheet(self, ctx, spreadsheet_id: str):
-        logging.info(
-            f"Setting spreadsheet ID to {spreadsheet_id} for server {ctx.guild.id}."
-        )
-        self.config_manager.create_or_update_config(
-            {"server_id": str(ctx.guild.id), "spreadsheet_id": spreadsheet_id}
-        )
-        await ctx.send(f"Spreadsheet ID set to {spreadsheet_id}.")
-
-    @commands.command(name="status", help="Get the bot status.")
-    @requires_configuration()
-    async def status_command(self, ctx):
-        logging.info(f"Getting bot status for server {ctx.guild.id}.")
-        config = self.config_manager.get_config(str(ctx.guild.id))
-        if config:
-            status = f"Bot is configured: {config.is_configured}\n"
-            status += f"Spreadsheet ID: {config.spreadsheet_id}\n"
-            status += f"Forum Channel ID: {config.forum_channel_id}\n"
-            status += f"Enabled: {config.enabled}\n"
-            await ctx.send(status)
-        else:
-            await ctx.send("Bot is not configured for this server.")
-
-    @commands.command(name="enable", help="Enable the bot for this server.")
+    @commands.command(
+        name="enable",
+        help="Enable bot functionality for this server",
+        brief="Enable bot",
+    )
     @requires_configuration()
     async def enable(self, ctx):
-        logging.info(f"Enabling bot for server {ctx.guild.id}.")
+        """Enable the bot's functionality for this server"""
+        logging.info(f"enable called by {ctx.author} in {ctx.guild}")
         self.config_manager.create_or_update_config(
             {"server_id": str(ctx.guild.id), "enabled": True}
         )
         await ctx.send("Bot enabled.")
 
-    @commands.command(name="disable", help="Disable the bot for this server.")
+    @commands.command(
+        name="disable",
+        help="Disable bot functionality for this server",
+        brief="Disable bot",
+    )
     @requires_configuration()
     async def disable(self, ctx):
-        logging.info(f"Disabling bot for server {ctx.guild.id}.")
+        """Disable the bot's functionality for this server"""
+        logging.info(f"disable called by {ctx.author} in {ctx.guild}")
         self.config_manager.create_or_update_config(
             {"server_id": str(ctx.guild.id), "enabled": False}
         )
         await ctx.send("Bot disabled.")
 
-    @commands.command(name="exempt_thread", help="Exempt a thread from tag syncing.")
+    @commands.command(
+        name="exempt_thread",
+        help="Exclude a thread from synchronization",
+        brief="Exempt thread from sync",
+        usage="<thread_id>",
+    )
     @requires_configuration()
     async def exempt_thread(self, ctx, thread_id: str):
-        logging.info(f"Exempting thread {thread_id} for server {ctx.guild.id}.")
+        """
+        Exempt a specific thread from synchronization.
+        """
+        logging.info(f"Exempting thread {thread_id} for server {ctx.guild.id}")
         config = self.config_manager.get_config(str(ctx.guild.id))
         exempt_threads = config.exempt_threads or {}
         exempt_threads[thread_id] = True
@@ -193,11 +138,16 @@ class DiscordBot(commands.Cog):
         await ctx.send(f"Thread {thread_id} exempted.")
 
     @commands.command(
-        name="unexempt_thread", help="Unexempt a thread from tag syncing."
+        name="unexempt_thread",
+        help="Include a previously exempted thread in synchronization",
+        brief="Remove thread exemption",
+        usage="<thread_id>",
     )
     @requires_configuration()
     async def unexempt_thread(self, ctx, thread_id: str):
-        logging.info(f"Unexempting thread {thread_id} for server {ctx.guild.id}.")
+        """
+        Remove the exemption status from a thread.
+        """
         config = self.config_manager.get_config(str(ctx.guild.id))
         exempt_threads = config.exempt_threads or {}
         exempt_threads.pop(thread_id, None)
@@ -206,63 +156,342 @@ class DiscordBot(commands.Cog):
         )
         await ctx.send(f"Thread {thread_id} unexempted.")
 
-    @commands.command(name="exempt_channel", help="Exempt a channel from tag syncing.")
-    @requires_configuration()
-    async def exempt_channel(self, ctx, channel_id: str):
-        logging.info(f"Exempting channel {channel_id} for server {ctx.guild.id}.")
-        config = self.config_manager.get_config(str(ctx.guild.id))
-        exempt_channels = config.exempt_channels or {}
-        exempt_channels[channel_id] = True
-        self.config_manager.create_or_update_config(
-            {"server_id": str(ctx.guild.id), "exempt_channels": exempt_channels}
-        )
-        await ctx.send(f"Channel {channel_id} exempted.")
-
     @commands.command(
-        name="unexempt_channel", help="Unexempt a channel from tag syncing."
+        name="fix_threads",
+        help="Fix all thread tags and reactions in a forum channel",
+        brief="Fix thread tags",
+        usage="<channel_id>",
     )
-    @requires_configuration()
-    async def unexempt_channel(self, ctx, channel_id: str):
-        logging.info(f"Unexempting channel {channel_id} for server {ctx.guild.id}.")
-        config = self.config_manager.get_config(str(ctx.guild.id))
-        exempt_channels = config.exempt_channels or {}
-        exempt_channels.pop(channel_id, None)
-        self.config_manager.create_or_update_config(
-            {"server_id": str(ctx.guild.id), "exempt_channels": exempt_channels}
-        )
-        await ctx.send(f"Channel {channel_id} unexempted.")
+    async def fix_threads(self, ctx, channel_id: str):
+        """
+        Fix all thread tags and reactions in the specified forum channel.
+        Only usable by the bot owner or server owner.
+        """
+        logging.info(f"fix_threads called by {ctx.author} in {ctx.guild}")
 
-    @commands.command(name="channel", help="Set the forum channel ID.")
-    @requires_configuration()
-    async def channel(self, ctx, channel_id: str):
-        logging.info(
-            f"Setting forum channel ID to {channel_id} for server {ctx.guild.id}."
-        )
-        self.config_manager.create_or_update_config(
-            {"server_id": str(ctx.guild.id), "forum_channel_id": channel_id}
-        )
-        await ctx.send(f"Forum channel ID set to {channel_id}.")
+        try:
+            channel = self.bot.get_channel(int(channel_id))
+            if not isinstance(channel, discord.ForumChannel):
+                logging.warning(f"Invalid channel type for ID {channel_id}")
+                await ctx.send("The provided channel ID must be a forum channel.")
+                return
 
-    @commands.command(name="set_credentials", help="Set the google credentials.")
-    @requires_configuration()
-    async def set_credentials_command(self, ctx):
-        logging.info(f"Opening credentials modal for server {ctx.guild.id}.")
-        modal = CredentialsModal(self, str(ctx.guild.id))
-        await ctx.interaction.response.send_modal(modal)
+            # Get the available tags from the forum channel
+            not_added_tag = None
+            added_tag = None
+            initial_vote_tag = None
 
-    async def set_credentials(self, server_id: str, credentials: str):
-        logging.info(f"Setting google credentials for server {server_id}.")
-        self.config_manager.set_google_credentials(server_id, json.loads(credentials))
-        await self.spreadsheet_service.initialize_google_api(server_id)
+            for tag in channel.available_tags:
+                if tag.id == 1258877875457626154:
+                    not_added_tag = tag
+                elif tag.id == 1298038416025452585:
+                    added_tag = tag
+                elif tag.id == 1315553680874803291:
+                    initial_vote_tag = tag
 
-    @tasks.loop(minutes=30)
-    async def sync_thread_tags(self):
-        logging.info("Running sync_thread_tags background task.")
-        if self.sync_guild_id:
-            guild = self.get_guild(int(self.sync_guild_id))
-            if guild:
-                await self.spreadsheet_service.sync_all_threads(guild)
-            else:
-                logging.error(f"Guild with ID {self.sync_guild_id} not found.")
+            if not all([not_added_tag, added_tag, initial_vote_tag]):
+                await ctx.send("Could not find all required tags in the forum channel.")
+                return
+
+            status_message = await ctx.send("Starting thread fix process...")
+            fixed_count = 0
+            error_count = 0
+
+            # Get all active threads in the channel
+            threads = [thread for thread in channel.threads if not thread.archived]
+            logging.info(f"Found {len(threads)} active threads to process")
+
+            for thread in threads:
+                try:
+                    logging.info(f"Processing thread: {thread.id}")
+                    # Get thread age in hours
+                    thread_age = (
+                        discord.utils.utcnow() - thread.created_at
+                    ).total_seconds() / 3600
+                    logging.info(f"Thread age: {thread_age} hours")
+
+                    # Get the first message for reaction counting
+                    first_message = await thread.fetch_message(thread.id)
+                    logging.info(
+                        f"Retrieved first message: {first_message.id if first_message else 'None'}"
+                    )
+
+                    # Count reactions
+                    yes_reactions = 0
+                    no_reactions = 0
+                    if first_message:
+                        for reaction in first_message.reactions:
+                            if isinstance(reaction.emoji, discord.Emoji):
+                                if (
+                                    reaction.emoji.id == 1263941895625900085
+                                ):  # pickle_yes
+                                    yes_reactions = reaction.count - 1
+                                elif (
+                                    reaction.emoji.id == 1263941842244730972
+                                ):  # pickle_no
+                                    no_reactions = reaction.count - 1
+
+                    logging.info(
+                        f"Reaction counts - Yes: {yes_reactions}, No: {no_reactions}"
+                    )
+
+                    # Calculate vote percentage
+                    total_votes = yes_reactions + no_reactions
+                    vote_percentage = (
+                        (yes_reactions / total_votes * 100) if total_votes > 0 else 0
+                    )
+                    logging.info(f"Vote percentage: {vote_percentage}%")
+
+                    # Get current tags
+                    current_tags = thread.applied_tags.copy()
+
+                    # Remove our managed tags from current tags
+                    current_tags = [
+                        tag
+                        for tag in current_tags
+                        if tag.id
+                        not in [not_added_tag.id, added_tag.id, initial_vote_tag.id]
+                    ]
+
+                    # Add appropriate tags based on conditions
+                    if thread_age <= 24:
+                        current_tags.append(initial_vote_tag)
+                    else:
+                        if vote_percentage >= 50:
+                            current_tags.append(added_tag)
+                        else:
+                            current_tags.append(not_added_tag)
+
+                    # Update thread tags
+                    await thread.edit(applied_tags=current_tags)
+
+                    # Ensure reaction emojis are present
+                    yes_emoji = self.bot.get_emoji(1263941895625900085)
+                    no_emoji = self.bot.get_emoji(1263941842244730972)
+
+                    if first_message:
+                        await first_message.add_reaction(yes_emoji)
+                        await first_message.add_reaction(no_emoji)
+
+                    fixed_count += 1
+                    logging.info(f"Successfully processed thread {thread.id}")
+
+                    # Update status every 10 threads
+                    if fixed_count % 10 == 0:
+                        await status_message.edit(
+                            content=f"Fixed {fixed_count} threads... ({error_count} errors)"
+                        )
+
+                except Exception as e:
+                    logging.error(f"Error fixing thread {thread.id}: {e}")
+                    error_count += 1
+
+            await status_message.edit(
+                content=f"Process complete! Fixed {fixed_count} threads with {error_count} errors."
+            )
+
+        except Exception as e:
+            logging.error(f"Error in fix_threads command: {e}", exc_info=True)
+            await ctx.send(f"An error occurred: {str(e)}")
+
+    @fix_threads.error
+    async def fix_threads_error(self, ctx, error):
+        """Error handler for fix_threads command"""
+        logging.error(f"Error in fix_threads: {error}", exc_info=True)
+        if isinstance(error, commands.MissingRequiredArgument):
+            await ctx.send(
+                "Please provide a channel ID. Usage: !fix_threads <channel_id>"
+            )
+        elif isinstance(error, commands.CommandInvokeError):
+            await ctx.send(
+                f"An error occurred while executing the command: {str(error)}"
+            )
         else:
-            logging.warning("SYNC_GUILD_ID is not set, skipping background task.")
+            await ctx.send(f"An unexpected error occurred: {str(error)}")
+
+    @tasks.loop(minutes=5)
+    async def combined_sync_task(self):
+        """Background task that combines sync and fix_threads functionality"""
+        try:
+            logging.info("Starting combined sync task")
+            guild = self.bot.get_guild(self.sync_guild_id)
+            if not guild:
+                logging.error(f"Could not find guild with ID {self.sync_guild_id}")
+                return
+
+            # Get server config
+            server_config = self.config_manager.get_config(str(guild.id))
+            if not server_config or not server_config.forum_channel_id:
+                logging.error("No server config or forum channel configured")
+                return
+
+            channel = guild.get_channel(int(server_config.forum_channel_id))
+            notification_channel = guild.get_channel(1260691801577099295)
+
+            if not isinstance(channel, discord.ForumChannel):
+                logging.error("Configured channel is not a forum channel")
+                return
+
+            # Get required tags
+            not_added_tag = None
+            added_tag = None
+            initial_vote_tag = None
+
+            for tag in channel.available_tags:
+                if tag.id == 1258877875457626154:
+                    not_added_tag = tag
+                elif tag.id == 1298038416025452585:
+                    added_tag = tag
+                elif tag.id == 1315553680874803291:
+                    initial_vote_tag = tag
+
+            if not all([not_added_tag, added_tag, initial_vote_tag]):
+                logging.error("Could not find all required tags")
+                return
+
+            # Process all active threads
+            threads = [thread for thread in channel.threads if not thread.archived]
+            for thread in threads:
+                try:
+                    # Get thread age in hours
+                    thread_age = (
+                        discord.utils.utcnow() - thread.created_at
+                    ).total_seconds() / 3600
+
+                    # Get the first message for reaction counting
+                    first_message = await thread.fetch_message(thread.id)
+
+                    # Count reactions
+                    yes_reactions = 0
+                    no_reactions = 0
+                    if first_message:
+                        for reaction in first_message.reactions:
+                            if isinstance(reaction.emoji, discord.Emoji):
+                                if reaction.emoji.id == int(server_config.yes_emoji_id):
+                                    yes_reactions = reaction.count - 1
+                                elif reaction.emoji.id == int(
+                                    server_config.no_emoji_id
+                                ):
+                                    no_reactions = reaction.count - 1
+
+                    # Calculate vote percentage
+                    total_votes = yes_reactions + no_reactions
+                    vote_percentage = (
+                        (yes_reactions / total_votes * 100) if total_votes > 0 else 0
+                    )
+
+                    # Check if thread just passed 24 hours
+                    if 24 <= thread_age <= 24.1:  # Small buffer to ensure we catch it
+                        result = "Won" if vote_percentage >= 50 else "Lost"
+                        if notification_channel:
+                            message_link = f"https://discord.com/channels/{guild.id}/{thread.id}/{thread.id}"
+                            notification = f"[{thread.name}]({message_link}) -> {result} Quality Control"
+                            await notification_channel.send(notification)
+
+                    # Get current tags
+                    current_tags = thread.applied_tags.copy()
+                    current_tags = [
+                        tag
+                        for tag in current_tags
+                        if tag.id
+                        not in [not_added_tag.id, added_tag.id, initial_vote_tag.id]
+                    ]
+
+                    # Add appropriate tags based on conditions
+                    if thread_age <= 24:
+                        current_tags.append(initial_vote_tag)
+                    else:
+                        if vote_percentage >= 50:
+                            current_tags.append(added_tag)
+                        else:
+                            current_tags.append(not_added_tag)
+
+                    # Update thread tags
+                    await thread.edit(applied_tags=current_tags)
+
+                    # Ensure reaction emojis are present
+                    yes_emoji = self.bot.get_emoji(int(server_config.yes_emoji_id))
+                    no_emoji = self.bot.get_emoji(int(server_config.no_emoji_id))
+                    if first_message:
+                        await first_message.add_reaction(yes_emoji)
+                        await first_message.add_reaction(no_emoji)
+
+                except Exception as e:
+                    logging.error(f"Error processing thread {thread.id}: {e}")
+
+            # Run the spreadsheet sync
+            await self.spreadsheet_service.sync_all_threads(guild, None)
+
+        except Exception as e:
+            logging.error(f"Error in combined sync task: {e}", exc_info=True)
+
+    @combined_sync_task.before_loop
+    async def before_combined_sync(self):
+        """Wait for the bot to be ready before starting the task"""
+        await self.bot.wait_until_ready()
+
+    async def setup_hook(self) -> None:
+        """This is called when the bot is starting up"""
+        await self.bot.load_extension("src.settings")
+        # Load other extensions...
+
+        # Log what commands are available before sync
+        logging.info(
+            f"Commands before sync: {[cmd.name for cmd in self.bot.tree.get_commands()]}"
+        )
+
+        # Sync commands
+        if self.sync_guild_id:
+            guild = discord.Object(id=self.sync_guild_id)
+            self.bot.tree.copy_global_to(guild=guild)
+            await self.bot.tree.sync(guild=guild)
+        else:
+            await self.bot.tree.sync()
+
+        # Log what commands are available after sync
+        logging.info(
+            f"Commands after sync: {[cmd.name for cmd in self.bot.tree.get_commands()]}"
+        )
+
+    async def check_and_initialize(self):
+        """Check and initialize bot configuration"""
+        server_config = self.config_manager.get_config(self.sync_guild_id)
+        if server_config and server_config.is_configured:
+            logging.info(
+                "Bot is configured, initializing SpreadsheetService and starting background task"
+            )
+            await self.spreadsheet_service.initialize_google_api()
+            self.sync_thread_tags.start()
+            self.background_task_running = True
+        else:
+            logging.info(
+                "Bot is not configured, skipping SpreadsheetService initialization and background task"
+            )
+
+    async def close(self):
+        """Cleanup method called when the bot is shutting down"""
+        logging.info("Closing bot and database session")
+        if self.background_task_running:
+            self.sync_thread_tags.cancel()
+        await super().close()
+
+    def cog_load(self) -> None:
+        """Called when the cog is loaded"""
+        logging.info(
+            f"DiscordBot cog loaded with commands: {[cmd.name for cmd in self.get_commands()]}"
+        )
+
+
+async def setup(bot: commands.Bot):
+    """
+    Sets up the DiscordBot cog and adds it to the bot.
+
+    This function is called by the bot when loading extensions.
+    """
+    config_manager = bot.config_manager
+    session = bot.session
+    cog = DiscordBot(bot, config_manager, session)
+    await bot.add_cog(cog)
+    logging.info(
+        f"DiscordBot cog loaded with commands: {', '.join([command.name for command in cog.get_commands()])}"
+    )

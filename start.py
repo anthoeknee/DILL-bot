@@ -16,6 +16,7 @@ from src.bot import DiscordBot
 from src.models import Base
 from src.config import ConfigManager, load_config
 from src.settings import SettingsCog
+from src.help import HelpCommand
 
 dotenv.load_dotenv()
 
@@ -65,7 +66,6 @@ async def setup_bot():
     engine = setup_database()
     Session = sessionmaker(bind=engine)
     session = Session()
-    config_manager = ConfigManager(session)
 
     intents = discord.Intents.default()
     intents.message_content = True
@@ -75,16 +75,28 @@ async def setup_bot():
         command_prefix=commands.when_mentioned_or(load_config()["bot"]["prefix"]),
         intents=intents,
         help_command=None,
+        owner_id=1114624963169747068,
+        application_id=1298080591723626506,
     )
 
-    discord_bot = DiscordBot(
-        base_bot=base_bot,
-        config_manager=config_manager,
-        session=session,
-    )
+    base_bot.session = session
+    config_manager = ConfigManager(session)
+    base_bot.config_manager = config_manager
 
-    await base_bot.add_cog(SettingsCog(discord_bot))
-    await base_bot.add_cog(discord_bot)
+    # Load extensions
+    await base_bot.load_extension("src.settings")
+    await base_bot.load_extension("src.bot")
+    await base_bot.add_cog(HelpCommand(load_config()["bot"]["prefix"]))
+
+    @base_bot.event
+    async def on_ready():
+        logging.info(f"Logged in as {base_bot.user.name}")
+        # Sync commands after bot is ready
+        logging.info("Syncing commands...")
+        await base_bot.tree.sync()
+        logging.info(
+            f"Commands synced: {[cmd.name for cmd in base_bot.tree.get_commands()]}"
+        )
 
     return base_bot
 
