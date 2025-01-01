@@ -395,6 +395,7 @@ class SpreadsheetService:
                 )
                 return
 
+            # Check if reactions are already present before adding
             if not any(
                 reaction.emoji == yes_emoji for reaction in first_message.reactions
             ):

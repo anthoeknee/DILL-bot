@@ -170,7 +170,19 @@ class DiscordBot(commands.Cog, name="Bot Management"):
         logging.info(f"fix_threads called by {ctx.author} in {ctx.guild}")
 
         try:
-            channel = self.bot.get_channel(int(channel_id))
+            # Convert channel_id to integer
+            try:
+                channel_id_int = int(channel_id)
+            except ValueError:
+                logging.error(
+                    f"Invalid channel ID format: {channel_id}. Expecting an integer."
+                )
+                await ctx.send(
+                    f"Invalid channel ID format: {channel_id}. Please provide a valid channel ID."
+                )
+                return
+
+            channel = self.bot.get_channel(channel_id_int)
             if not isinstance(channel, discord.ForumChannel):
                 logging.warning(f"Invalid channel type for ID {channel_id}")
                 await ctx.send("The provided channel ID must be a forum channel.")
@@ -478,6 +490,24 @@ class DiscordBot(commands.Cog, name="Bot Management"):
         logging.info(
             f"DiscordBot cog loaded with commands: {[cmd.name for cmd in self.get_commands()]}"
         )
+
+    @commands.Cog.listener()
+    async def on_thread_create(self, thread: discord.Thread):
+        """React to new threads in the tracked forum channel."""
+        try:
+            # Check if the thread is in the tracked forum channel
+            server_config = self.config_manager.get_config(str(thread.guild.id))
+            if (
+                not server_config
+                or str(thread.parent_id) != server_config.forum_channel_id
+            ):
+                return
+
+            # Add reactions to the first message of the thread
+            await self.spreadsheet_service.manage_vote_reactions(thread, server_config)
+
+        except Exception as e:
+            logging.error(f"Error reacting to new thread {thread.id}: {e}")
 
 
 async def setup(bot: commands.Bot):
