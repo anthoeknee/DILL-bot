@@ -409,12 +409,10 @@ class DiscordBot(commands.Cog, name="Bot Management"):
                     # Update thread tags
                     await thread.edit(applied_tags=current_tags)
 
-                    # Ensure reaction emojis are present
-                    yes_emoji = self.bot.get_emoji(int(server_config.yes_emoji_id))
-                    no_emoji = self.bot.get_emoji(int(server_config.no_emoji_id))
-                    if first_message:
-                        await first_message.add_reaction(yes_emoji)
-                        await first_message.add_reaction(no_emoji)
+                    # Ensure reactions are present
+                    await self.spreadsheet_service.manage_vote_reactions(
+                        thread, server_config
+                    )
 
                 except Exception as e:
                     logging.error(f"Error processing thread {thread.id}: {e}")

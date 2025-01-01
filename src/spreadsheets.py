@@ -384,9 +384,14 @@ class SpreadsheetService:
 
             yes_emoji = self.bot.get_emoji(int(yes_emoji_id))
             no_emoji = self.bot.get_emoji(int(no_emoji_id))
-            if not yes_emoji or not no_emoji:
+            if not yes_emoji:
                 logging.warning(
-                    f"Yes or No emojis not found for server {thread.guild.id}, skipping vote reaction management."
+                    f"Yes emoji with ID {yes_emoji_id} not found for server {thread.guild.id}, skipping vote reaction management."
+                )
+                return
+            if not no_emoji:
+                logging.warning(
+                    f"No emoji with ID {no_emoji_id} not found for server {thread.guild.id}, skipping vote reaction management."
                 )
                 return
 
@@ -401,7 +406,10 @@ class SpreadsheetService:
                 await first_message.add_reaction(no_emoji)
                 logging.info(f"Added no reaction to thread: {thread.id}")
         except Exception as e:
-            logging.error(f"Error managing vote reactions for thread {thread.id}: {e}")
+            logging.error(
+                f"Error managing vote reactions for thread {thread.id}: {e}",
+                exc_info=True,
+            )
 
     async def send_approval_notification(self, thread: discord.Thread):
         """Send notification when a thread crosses 50% approval"""
