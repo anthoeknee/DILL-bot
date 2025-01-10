@@ -68,10 +68,66 @@ class DiscordBot(commands.Cog, name="Bot Management"):
 
         try:
             guild = interaction.guild
+            channel = guild.get_channel(
+                int(self.config_manager.get_config(str(guild.id)).forum_channel_id)
+            )
+
+            if isinstance(channel, discord.ForumChannel):
+                threads = [thread for thread in channel.threads if not thread.archived]
+                updated_count = 0
+
+                for thread in threads:
+                    try:
+                        thread_age = (
+                            discord.utils.utcnow() - thread.created_at
+                        ).total_seconds() / 3600
+                        first_message = await thread.fetch_message(thread.id)
+
+                        if first_message:
+                            # Count reactions
+                            yes_count = no_count = 0
+                            for reaction in first_message.reactions:
+                                if isinstance(reaction.emoji, discord.Emoji):
+                                    if reaction.emoji.id == int(
+                                        self.config_manager.get_config(
+                                            str(guild.id)
+                                        ).yes_emoji_id
+                                    ):
+                                        yes_count = reaction.count - 1
+                                    elif reaction.emoji.id == int(
+                                        self.config_manager.get_config(
+                                            str(guild.id)
+                                        ).no_emoji_id
+                                    ):
+                                        no_count = reaction.count - 1
+
+                            total_votes = yes_count + no_count
+                            vote_percentage = (
+                                (yes_count / total_votes * 100)
+                                if total_votes > 0
+                                else 0
+                            )
+
+                            # Use the helper function to manage tags
+                            if await self.manage_thread_tags(
+                                thread, channel, vote_percentage, thread_age
+                            ):
+                                updated_count += 1
+
+                    except Exception as e:
+                        logging.error(f"Error processing thread {thread.id}: {e}")
+                        continue
+
+                await progress_message.edit(
+                    content=f"Updated tags for {updated_count} threads. Starting spreadsheet sync..."
+                )
+
+            # Now sync with spreadsheet
             result = await self.spreadsheet_service.sync_all_threads(
                 guild, progress_message
             )
-            await progress_message.edit(content=result)
+            await progress_message.edit(content=f"{result}")
+
         except Exception as e:
             logging.error(f"Error in sync command: {e}", exc_info=True)
             await progress_message.edit(
@@ -321,9 +377,77 @@ class DiscordBot(commands.Cog, name="Bot Management"):
         else:
             await ctx.send(f"An unexpected error occurred: {str(error)}")
 
+    @commands.Cog.listener()
+    async def on_thread_create(self, thread: discord.Thread):
+        """React to new threads in the tracked forum channel."""
+        try:
+            # Check if the thread is in the tracked forum channel
+            server_config = self.config_manager.get_config(str(thread.guild.id))
+            if (
+                not server_config
+                or str(thread.parent_id) != server_config.forum_channel_id
+            ):
+                return
+
+            # Add Initial Vote tag immediately
+            initial_vote_tag = discord.utils.get(
+                thread.parent.available_tags, id=1315553680874803291
+            )
+            if initial_vote_tag:
+                await thread.add_tags(initial_vote_tag)
+                logging.info(f"Added Initial Vote tag to new thread: {thread.id}")
+
+            # Add vote reactions
+            await self.spreadsheet_service.manage_vote_reactions(thread, server_config)
+
+        except Exception as e:
+            logging.error(f"Error handling new thread {thread.id}: {e}")
+
+    async def manage_thread_tags(self, thread, channel, vote_percentage, thread_age):
+        """Helper function to manage thread tags consistently"""
+        try:
+            current_tags = thread.applied_tags.copy()
+            tags_updated = False
+
+            # Get all our managed tags
+            initial_vote_tag = discord.utils.get(
+                channel.available_tags, id=1315553680874803291
+            )
+            added_tag = discord.utils.get(
+                channel.available_tags, id=1298038416025452585
+            )
+            not_added_tag = discord.utils.get(
+                channel.available_tags, id=1258877875457626154
+            )
+
+            # Remove all managed tags first
+            current_tags = [
+                tag
+                for tag in current_tags
+                if tag.id
+                not in [1315553680874803291, 1298038416025452585, 1258877875457626154]
+            ]
+
+            # Add appropriate tags based on conditions
+            if thread_age < 24:
+                current_tags.append(initial_vote_tag)
+            else:
+                if vote_percentage >= 50.1:
+                    current_tags.append(added_tag)
+                else:
+                    current_tags.append(not_added_tag)
+
+            # Update thread tags
+            await thread.edit(applied_tags=current_tags)
+            return True
+
+        except Exception as e:
+            logging.error(f"Error managing tags for thread {thread.id}: {e}")
+            return False
+
     @tasks.loop(minutes=5)
     async def combined_sync_task(self):
-        """Background task that combines sync and fix_threads functionality"""
+        """Background task that handles tag management and spreadsheet sync"""
         try:
             logging.info("Starting combined sync task")
             guild = self.bot.get_guild(self.sync_guild_id)
@@ -331,106 +455,64 @@ class DiscordBot(commands.Cog, name="Bot Management"):
                 logging.error(f"Could not find guild with ID {self.sync_guild_id}")
                 return
 
-            # Get server config
             server_config = self.config_manager.get_config(str(guild.id))
             if not server_config or not server_config.forum_channel_id:
-                logging.error("No server config or forum channel configured")
                 return
 
             channel = guild.get_channel(int(server_config.forum_channel_id))
-            notification_channel = guild.get_channel(1260691801577099295)
-
             if not isinstance(channel, discord.ForumChannel):
-                logging.error("Configured channel is not a forum channel")
-                return
-
-            # Get required tags
-            not_added_tag = None
-            added_tag = None
-            initial_vote_tag = None
-
-            for tag in channel.available_tags:
-                if tag.id == 1258877875457626154:
-                    not_added_tag = tag
-                elif tag.id == 1298038416025452585:
-                    added_tag = tag
-                elif tag.id == 1315553680874803291:
-                    initial_vote_tag = tag
-
-            if not all([not_added_tag, added_tag, initial_vote_tag]):
-                logging.error("Could not find all required tags")
                 return
 
             # Process all active threads
             threads = [thread for thread in channel.threads if not thread.archived]
             for thread in threads:
                 try:
-                    # Get thread age in hours
                     thread_age = (
                         discord.utils.utcnow() - thread.created_at
                     ).total_seconds() / 3600
-
-                    # Get the first message for reaction counting
                     first_message = await thread.fetch_message(thread.id)
 
-                    # Count reactions
-                    yes_reactions = 0
-                    no_reactions = 0
                     if first_message:
+                        # Count reactions
+                        yes_count = no_count = 0
                         for reaction in first_message.reactions:
                             if isinstance(reaction.emoji, discord.Emoji):
                                 if reaction.emoji.id == int(server_config.yes_emoji_id):
-                                    yes_reactions = reaction.count - 1
+                                    yes_count = reaction.count - 1
                                 elif reaction.emoji.id == int(
                                     server_config.no_emoji_id
                                 ):
-                                    no_reactions = reaction.count - 1
+                                    no_count = reaction.count - 1
 
-                    # Calculate vote percentage
-                    total_votes = yes_reactions + no_reactions
-                    vote_percentage = (
-                        (yes_reactions / total_votes * 100) if total_votes > 0 else 0
-                    )
+                        total_votes = yes_count + no_count
+                        vote_percentage = (
+                            (yes_count / total_votes * 100) if total_votes > 0 else 0
+                        )
 
-                    # Check if thread just passed 24 hours
-                    if 24 <= thread_age <= 24.1:  # Small buffer to ensure we catch it
-                        result = "Won" if vote_percentage >= 50 else "Lost"
-                        if notification_channel:
-                            message_link = f"https://discord.com/channels/{guild.id}/{thread.id}/{thread.id}"
-                            notification = f"[{thread.name}]({message_link}) -> {result} Quality Control"
-                            await notification_channel.send(notification)
+                        # Use the helper function to manage tags
+                        updated = await self.manage_thread_tags(
+                            thread, channel, vote_percentage, thread_age
+                        )
 
-                    # Get current tags
-                    current_tags = thread.applied_tags.copy()
-                    current_tags = [
-                        tag
-                        for tag in current_tags
-                        if tag.id
-                        not in [not_added_tag.id, added_tag.id, initial_vote_tag.id]
-                    ]
+                        # Handle 24-hour transition notifications
+                        if 24 <= thread_age <= 24.1 and updated:
+                            notification_channel = guild.get_channel(
+                                1260691801577099295
+                            )
+                            if notification_channel:
+                                result = "Won" if vote_percentage >= 50.1 else "Lost"
+                                await notification_channel.send(
+                                    f"[{thread.name}]({thread.jump_url}) -> {result} Quality Control"
+                                )
 
-                    # Add appropriate tags based on conditions
-                    if thread_age <= 24:
-                        current_tags.append(initial_vote_tag)
-                    else:
-                        if vote_percentage >= 50:
-                            current_tags.append(added_tag)
-                        else:
-                            current_tags.append(not_added_tag)
-
-                    # Update thread tags
-                    await thread.edit(applied_tags=current_tags)
-
-                    # Ensure reactions are present
-                    await self.spreadsheet_service.manage_vote_reactions(
-                        thread, server_config
-                    )
+                                # Sync to spreadsheet only for approved threads
+                                if vote_percentage >= 50.1:
+                                    await self.spreadsheet_service.sync_all_threads(
+                                        guild, None
+                                    )
 
                 except Exception as e:
                     logging.error(f"Error processing thread {thread.id}: {e}")
-
-            # Run the spreadsheet sync
-            await self.spreadsheet_service.sync_all_threads(guild, None)
 
         except Exception as e:
             logging.error(f"Error in combined sync task: {e}", exc_info=True)
@@ -490,24 +572,6 @@ class DiscordBot(commands.Cog, name="Bot Management"):
         logging.info(
             f"DiscordBot cog loaded with commands: {[cmd.name for cmd in self.get_commands()]}"
         )
-
-    @commands.Cog.listener()
-    async def on_thread_create(self, thread: discord.Thread):
-        """React to new threads in the tracked forum channel."""
-        try:
-            # Check if the thread is in the tracked forum channel
-            server_config = self.config_manager.get_config(str(thread.guild.id))
-            if (
-                not server_config
-                or str(thread.parent_id) != server_config.forum_channel_id
-            ):
-                return
-
-            # Add reactions to the first message of the thread
-            await self.spreadsheet_service.manage_vote_reactions(thread, server_config)
-
-        except Exception as e:
-            logging.error(f"Error reacting to new thread {thread.id}: {e}")
 
 
 async def setup(bot: commands.Bot):

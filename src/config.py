@@ -45,24 +45,33 @@ class ConfigManager:
     def _load_google_credentials(self) -> Optional[Dict]:
         """Loads Google credentials from the specified file path."""
         credentials_path = os.getenv("GOOGLE_CREDENTIALS_PATH")
+        logging.info(f"Attempting to load Google credentials from: {credentials_path}")
+
         if not credentials_path:
             logging.warning(
                 "GOOGLE_CREDENTIALS_PATH not set, skipping credentials load."
             )
             return None
+
         try:
             with open(credentials_path, "r") as f:
                 credentials = json.load(f)
-                logging.info("Google credentials loaded from file.")
+                logging.info(
+                    f"Successfully loaded Google credentials from {credentials_path}."
+                )
                 return credentials
         except FileNotFoundError:
             logging.error(f"Google credentials file not found at {credentials_path}.")
             return None
         except json.JSONDecodeError:
-            logging.error(f"Error decoding JSON from {credentials_path}.")
+            logging.error(
+                f"Error decoding JSON from {credentials_path}. Please ensure the file contains valid JSON."
+            )
             return None
         except Exception as e:
-            logging.error(f"Error loading google credentials: {e}")
+            logging.error(
+                f"An unexpected error occurred while loading Google credentials: {e}"
+            )
             return None
 
     def get_google_credentials(self) -> Optional[Dict]:
