@@ -170,9 +170,7 @@ class SpreadsheetService:
             total_votes = yes_count + no_count
             ratio = (yes_count / total_votes * 100) if total_votes > 0 else 0
 
-            # Skip threads with 50% or less positive votes
-            if ratio <= 50:
-                return None
+
 
             thread_id = str(thread.id)
             prev_ratio = self.last_thread_states.get(thread_id, 0)
