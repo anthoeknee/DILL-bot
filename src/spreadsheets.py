@@ -107,9 +107,11 @@ class SpreadsheetService:
         for i in range(0, total_threads, batch_size):
             batch = all_threads[i : i + batch_size]
             batch_tasks = []
+            reaction_tasks = []  # New list for reaction management tasks
 
             for thread in batch:
                 current_tags = set(tag.name for tag in thread.applied_tags)
+                # Add thread data processing task
                 task = self.process_thread_data(
                     thread=thread,
                     config=server_config,
@@ -119,8 +121,13 @@ class SpreadsheetService:
                 )
                 batch_tasks.append(task)
 
+                # Add reaction management task
+                reaction_task = self.manage_vote_reactions(thread, server_config)
+                reaction_tasks.append(reaction_task)
+
             # Process batch concurrently
             batch_results = await asyncio.gather(*batch_tasks)
+            await asyncio.gather(*reaction_tasks)  # Process reaction tasks
             all_thread_data.extend([data for data in batch_results if data])
 
             # Update progress
@@ -157,15 +164,37 @@ class SpreadsheetService:
                 logging.warning(f"No first message found for thread: {thread.id}")
                 return None
 
+            # Define accepted emojis
+            yes_emojis = {
+                "custom": int(config.yes_emoji_id),  # Your custom pickle_yes
+                "check": "✅",  # Unicode white_check_mark
+                "check2": "☑️",  # Unicode ballot_box_with_check
+            }
+            no_emojis = {
+                "custom": int(config.no_emoji_id),  # Your custom pickle_no
+                "x": "❌",  # Unicode x
+                "x2": "✖️",  # Unicode heavy_multiplication_x
+            }
+
             # Count reactions
             yes_count = 0
             no_count = 0
+
             for reaction in first_message.reactions:
+                # Handle custom emoji
                 if isinstance(reaction.emoji, discord.Emoji):
-                    if reaction.emoji.id == int(config.yes_emoji_id):
-                        yes_count = reaction.count - 1
-                    elif reaction.emoji.id == int(config.no_emoji_id):
-                        no_count = reaction.count - 1
+                    emoji_id = reaction.emoji.id
+                    if emoji_id == yes_emojis["custom"]:
+                        yes_count += reaction.count - 1
+                    elif emoji_id == no_emojis["custom"]:
+                        no_count += reaction.count - 1
+                # Handle Unicode emoji
+                else:
+                    emoji_str = str(reaction.emoji)
+                    if emoji_str in yes_emojis.values():
+                        yes_count += reaction.count - 1
+                    elif emoji_str in no_emojis.values():
+                        no_count += reaction.count - 1
 
             total_votes = yes_count + no_count
             ratio = (yes_count / total_votes * 100) if total_votes > 0 else 0
