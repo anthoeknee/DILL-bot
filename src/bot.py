@@ -14,6 +14,7 @@ from typing import Optional, Dict, Set
 from src.settings import SettingsCog
 from src.models import ServerConfig
 from discord import app_commands
+from src.sync import SyncCog
 
 
 class DiscordBot(commands.Cog, name="Bot Management"):
@@ -29,13 +30,10 @@ class DiscordBot(commands.Cog, name="Bot Management"):
         self.bot = base_bot
         self.session = session
         self.config_manager = config_manager
-        self.spreadsheet_service = SpreadsheetService(self.session, base_bot)
+        self.sync_cog = SyncCog(base_bot, config_manager, session)
         self.sync_guild_id = int(os.getenv("SYNC_GUILD_ID", "0"))
-        self.background_task_running = False
         logging.info("DiscordBot initialized.")
         logging.info(f"Commands registered: {[cmd.name for cmd in self.bot.commands]}")
-        # Start the background task
-        self.combined_sync_task.start()
 
     @commands.Cog.listener()
     async def on_ready(self):
@@ -109,7 +107,7 @@ class DiscordBot(commands.Cog, name="Bot Management"):
                             )
 
                             # Use the helper function to manage tags
-                            if await self.manage_thread_tags(
+                            if await self.sync_cog.manage_thread_tags(
                                 thread, channel, vote_percentage, thread_age
                             ):
                                 updated_count += 1
@@ -123,9 +121,7 @@ class DiscordBot(commands.Cog, name="Bot Management"):
                 )
 
             # Now sync with spreadsheet
-            result = await self.spreadsheet_service.sync_all_threads(
-                guild, progress_message
-            )
+            result = await self.sync_cog.sync_all_threads(guild, progress_message)
             await progress_message.edit(content=f"{result}")
 
         except Exception as e:
@@ -142,7 +138,7 @@ class DiscordBot(commands.Cog, name="Bot Management"):
     @requires_configuration()
     async def sync_command(self, ctx):
         """Legacy sync command using prefix"""
-        await self.sync_all_threads(ctx)
+        await self.sync_cog.sync_all_threads(ctx)
         await ctx.send("Synchronization complete!")
 
     @commands.command(
@@ -398,133 +394,19 @@ class DiscordBot(commands.Cog, name="Bot Management"):
                 logging.info(f"Added Initial Vote tag to new thread: {thread.id}")
 
             # Add vote reactions
-            await self.spreadsheet_service.manage_vote_reactions(thread, server_config)
+            spreadsheet_service = SpreadsheetService(self.session, self.bot)
+            await spreadsheet_service.manage_vote_reactions(thread, server_config)
+
+            # Process the thread immediately
+            await self.sync_cog.process_thread(thread, server_config)
 
         except Exception as e:
             logging.error(f"Error handling new thread {thread.id}: {e}")
 
-    async def manage_thread_tags(self, thread, channel, vote_percentage, thread_age):
-        """Helper function to manage thread tags consistently"""
-        try:
-            current_tags = thread.applied_tags.copy()
-            tags_updated = False
-
-            # Get all our managed tags
-            initial_vote_tag = discord.utils.get(
-                channel.available_tags, id=1315553680874803291
-            )
-            added_tag = discord.utils.get(
-                channel.available_tags, id=1298038416025452585
-            )
-            not_added_tag = discord.utils.get(
-                channel.available_tags, id=1258877875457626154
-            )
-
-            # Remove all managed tags first
-            current_tags = [
-                tag
-                for tag in current_tags
-                if tag.id
-                not in [1315553680874803291, 1298038416025452585, 1258877875457626154]
-            ]
-
-            # Add appropriate tags based on conditions
-            if thread_age < 24:
-                current_tags.append(initial_vote_tag)
-            else:
-                if vote_percentage >= 50.1:
-                    current_tags.append(added_tag)
-                else:
-                    current_tags.append(not_added_tag)
-
-            # Update thread tags
-            await thread.edit(applied_tags=current_tags)
-            return True
-
-        except Exception as e:
-            logging.error(f"Error managing tags for thread {thread.id}: {e}")
-            return False
-
-    @tasks.loop(minutes=5)
-    async def combined_sync_task(self):
-        """Background task that handles tag management and spreadsheet sync"""
-        try:
-            logging.info("Starting combined sync task")
-            guild = self.bot.get_guild(self.sync_guild_id)
-            if not guild:
-                logging.error(f"Could not find guild with ID {self.sync_guild_id}")
-                return
-
-            server_config = self.config_manager.get_config(str(guild.id))
-            if not server_config or not server_config.forum_channel_id:
-                return
-
-            channel = guild.get_channel(int(server_config.forum_channel_id))
-            if not isinstance(channel, discord.ForumChannel):
-                return
-
-            # Process all active threads
-            threads = [thread for thread in channel.threads if not thread.archived]
-            for thread in threads:
-                try:
-                    thread_age = (
-                        discord.utils.utcnow() - thread.created_at
-                    ).total_seconds() / 3600
-                    first_message = await thread.fetch_message(thread.id)
-
-                    if first_message:
-                        # Count reactions
-                        yes_count = no_count = 0
-                        for reaction in first_message.reactions:
-                            if isinstance(reaction.emoji, discord.Emoji):
-                                if reaction.emoji.id == int(server_config.yes_emoji_id):
-                                    yes_count = reaction.count - 1
-                                elif reaction.emoji.id == int(
-                                    server_config.no_emoji_id
-                                ):
-                                    no_count = reaction.count - 1
-
-                        total_votes = yes_count + no_count
-                        vote_percentage = (
-                            (yes_count / total_votes * 100) if total_votes > 0 else 0
-                        )
-
-                        # Use the helper function to manage tags
-                        updated = await self.manage_thread_tags(
-                            thread, channel, vote_percentage, thread_age
-                        )
-
-                        # Handle 24-hour transition notifications
-                        if 24 <= thread_age <= 24.1 and updated:
-                            notification_channel = guild.get_channel(
-                                1260691801577099295
-                            )
-                            if notification_channel:
-                                result = "Won" if vote_percentage >= 50.1 else "Lost"
-                                await notification_channel.send(
-                                    f"[{thread.name}]({thread.jump_url}) -> {result} Quality Control"
-                                )
-
-                                # Sync to spreadsheet only for approved threads
-                                if vote_percentage >= 50.1:
-                                    await self.spreadsheet_service.sync_all_threads(
-                                        guild, None
-                                    )
-
-                except Exception as e:
-                    logging.error(f"Error processing thread {thread.id}: {e}")
-
-        except Exception as e:
-            logging.error(f"Error in combined sync task: {e}", exc_info=True)
-
-    @combined_sync_task.before_loop
-    async def before_combined_sync(self):
-        """Wait for the bot to be ready before starting the task"""
-        await self.bot.wait_until_ready()
-
     async def setup_hook(self) -> None:
         """This is called when the bot is starting up"""
         await self.bot.load_extension("src.settings")
+        await self.bot.load_extension("src.sync")
         # Load other extensions...
 
         # Log what commands are available before sync
@@ -545,26 +427,10 @@ class DiscordBot(commands.Cog, name="Bot Management"):
             f"Commands after sync: {[cmd.name for cmd in self.bot.tree.get_commands()]}"
         )
 
-    async def check_and_initialize(self):
-        """Check and initialize bot configuration"""
-        server_config = self.config_manager.get_config(self.sync_guild_id)
-        if server_config and server_config.is_configured:
-            logging.info(
-                "Bot is configured, initializing SpreadsheetService and starting background task"
-            )
-            await self.spreadsheet_service.initialize_google_api()
-            self.sync_thread_tags.start()
-            self.background_task_running = True
-        else:
-            logging.info(
-                "Bot is not configured, skipping SpreadsheetService initialization and background task"
-            )
-
     async def close(self):
-        """Cleanup method called when the bot is shutting down"""
-        logging.info("Closing bot and database session")
-        if self.background_task_running:
-            self.sync_thread_tags.cancel()
+        """Cleanup method called when the bot is shutting down."""
+        logging.info("Closing bot and database session.")
+        await self.sync_cog.close()
         await super().close()
 
     def cog_load(self) -> None:
