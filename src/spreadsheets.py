@@ -170,8 +170,6 @@ class SpreadsheetService:
             total_votes = yes_count + no_count
             ratio = (yes_count / total_votes * 100) if total_votes > 0 else 0
 
-
-
             thread_id = str(thread.id)
             prev_ratio = self.last_thread_states.get(thread_id, 0)
 
@@ -372,6 +370,7 @@ class SpreadsheetService:
                     f"No first message found for thread: {thread.id}, skipping vote reaction management."
                 )
                 return
+
             yes_emoji_id = config.yes_emoji_id
             no_emoji_id = config.no_emoji_id
             if not yes_emoji_id or not no_emoji_id:
@@ -382,28 +381,18 @@ class SpreadsheetService:
 
             yes_emoji = self.bot.get_emoji(int(yes_emoji_id))
             no_emoji = self.bot.get_emoji(int(no_emoji_id))
-            if not yes_emoji:
+
+            if not yes_emoji or not no_emoji:
                 logging.warning(
-                    f"Yes emoji with ID {yes_emoji_id} not found for server {thread.guild.id}, skipping vote reaction management."
-                )
-                return
-            if not no_emoji:
-                logging.warning(
-                    f"No emoji with ID {no_emoji_id} not found for server {thread.guild.id}, skipping vote reaction management."
+                    f"Could not find emojis for server {thread.guild.id}. Yes emoji: {yes_emoji}, No emoji: {no_emoji}"
                 )
                 return
 
-            # Check if reactions are already present before adding
-            if not any(
-                reaction.emoji == yes_emoji for reaction in first_message.reactions
-            ):
-                await first_message.add_reaction(yes_emoji)
-                logging.info(f"Added yes reaction to thread: {thread.id}")
-            if not any(
-                reaction.emoji == no_emoji for reaction in first_message.reactions
-            ):
-                await first_message.add_reaction(no_emoji)
-                logging.info(f"Added no reaction to thread: {thread.id}")
+            # Always add both reactions
+            await first_message.add_reaction(yes_emoji)
+            await first_message.add_reaction(no_emoji)
+            logging.info(f"Added/Updated reactions for thread: {thread.id}")
+
         except Exception as e:
             logging.error(
                 f"Error managing vote reactions for thread {thread.id}: {e}",
