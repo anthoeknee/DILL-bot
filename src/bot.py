@@ -397,8 +397,13 @@ class DiscordBot(commands.Cog, name="Bot Management"):
             spreadsheet_service = SpreadsheetService(self.session, self.bot)
             await spreadsheet_service.manage_vote_reactions(thread, server_config)
 
-            # Process the thread immediately
-            await self.sync_cog.process_thread(thread, server_config)
+            # Process the thread immediately using the correct method name
+            await self.sync_cog.process_thread_data(
+                thread,
+                server_config,
+                {tag.name: tag for tag in thread.parent.available_tags},
+                set([tag.name for tag in thread.applied_tags]),
+            )
 
         except Exception as e:
             logging.error(f"Error handling new thread {thread.id}: {e}")
