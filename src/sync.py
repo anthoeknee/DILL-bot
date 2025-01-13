@@ -404,10 +404,16 @@ class SyncCog(commands.Cog, name="Synchronization"):
 
             server_config = self.config_manager.get_config(str(guild.id))
             if not server_config or not server_config.forum_channel_id:
+                logging.info(
+                    "Server not configured or forum channel ID not set, skipping combined_sync_task"
+                )
                 return
 
             channel = guild.get_channel(int(server_config.forum_channel_id))
             if not isinstance(channel, discord.ForumChannel):
+                logging.info(
+                    "Configured channel is not a ForumChannel, skipping combined_sync_task"
+                )
                 return
 
             # Get ALL threads (both active and archived)
@@ -418,7 +424,38 @@ class SyncCog(commands.Cog, name="Synchronization"):
             total_threads = len(all_threads)
             logging.info(f"Processing {total_threads} threads")
 
-            # ... rest of your spreadsheet sync logic ...
+            # Spreadsheet sync logic
+            all_thread_data = []
+            batch_size = 10  # Process 10 threads at a time
+
+            for i in range(0, total_threads, batch_size):
+                batch = all_threads[i : i + batch_size]
+                batch_tasks = []
+
+                for thread in batch:
+                    # Add thread data processing task
+                    task = self.process_thread_data(
+                        thread=thread,
+                        config=server_config,
+                        available_tags={
+                            tag.name: tag for tag in channel.available_tags
+                        },
+                        current_tags=set(tag.name for tag in thread.applied_tags),
+                        skip_notifications=True,  # Assuming you don't want notifications in the background task
+                    )
+                    batch_tasks.append(task)
+
+                # Process batch concurrently
+                batch_results = await asyncio.gather(*batch_tasks)
+                all_thread_data.extend([data for data in batch_results if data])
+
+            if all_thread_data:
+                await self.spreadsheet_service.update_sheet(
+                    all_thread_data, server_config
+                )
+                logging.info(f"Synced {len(all_thread_data)} threads.")
+            else:
+                logging.info("No thread data was collected to sync.")
 
         except Exception as e:
             logging.error(f"Error in combined sync task: {e}", exc_info=True)
