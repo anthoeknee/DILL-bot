@@ -31,6 +31,7 @@ class SyncCog(commands.Cog, name="Synchronization"):
             "added_to_list": 1298038416025452585,
             "not_added_to_list": 1258877875457626154,
         }
+        self.manage_tags_task.start()
 
     async def sync_all_threads(
         self,
@@ -320,8 +321,80 @@ class SyncCog(commands.Cog, name="Synchronization"):
             logging.error(f"Error updating tags for thread {thread.id}: {e}")
 
     @tasks.loop(minutes=5)
+    async def manage_tags_task(self):
+        """Background task to manage thread tags based on age and vote percentage."""
+        logging.info("Starting manage_tags_task")
+        try:
+            guild = self.bot.get_guild(self.sync_guild_id)
+            if not guild:
+                logging.error(f"Could not find guild with ID {self.sync_guild_id}")
+                return
+
+            server_config = self.config_manager.get_config(str(guild.id))
+            if not server_config or not server_config.forum_channel_id:
+                logging.info(
+                    "Server not configured or forum channel ID not set, skipping manage_tags_task"
+                )
+                return
+
+            channel = guild.get_channel(int(server_config.forum_channel_id))
+            if not isinstance(channel, discord.ForumChannel):
+                logging.info(
+                    "Configured channel is not a ForumChannel, skipping manage_tags_task"
+                )
+                return
+
+            # Get ALL threads (both active and archived)
+            all_threads = []
+            async for thread in channel.archived_threads(limit=None):
+                all_threads.append(thread)
+            all_threads.extend(channel.threads)
+
+            for thread in all_threads:
+                try:
+                    thread_age = (
+                        discord.utils.utcnow() - thread.created_at
+                    ).total_seconds() / 3600
+
+                    # Fetch the first message to count reactions
+                    first_message = await self.spreadsheet_service.fetch_first_message(
+                        thread
+                    )
+                    yes_count = no_count = 0
+                    if first_message:
+                        for reaction in first_message.reactions:
+                            if isinstance(reaction.emoji, discord.Emoji):
+                                if reaction.emoji.id == int(server_config.yes_emoji_id):
+                                    yes_count = reaction.count - 1
+                                elif reaction.emoji.id == int(
+                                    server_config.no_emoji_id
+                                ):
+                                    no_count = reaction.count - 1
+
+                    total_votes = yes_count + no_count
+                    vote_percentage = (
+                        (yes_count / total_votes * 100) if total_votes > 0 else 0
+                    )
+
+                    # Manage tags
+                    await self.manage_thread_tags(
+                        thread, channel, vote_percentage, thread_age
+                    )
+
+                except Exception as e:
+                    logging.error(f"Error processing thread {thread.id}: {e}")
+
+        except Exception as e:
+            logging.error(f"Error in manage_tags_task: {e}", exc_info=True)
+
+    @manage_tags_task.before_loop
+    async def before_manage_tags_task(self):
+        """Wait for the bot to be ready before starting the task."""
+        await self.bot.wait_until_ready()
+
+    @tasks.loop(minutes=30)
     async def combined_sync_task(self):
-        """Background task that handles tag management and spreadsheet sync."""
+        """Background task for spreadsheet synchronization only."""
         try:
             logging.info("Starting combined sync task")
             guild = self.bot.get_guild(self.sync_guild_id)
@@ -345,53 +418,7 @@ class SyncCog(commands.Cog, name="Synchronization"):
             total_threads = len(all_threads)
             logging.info(f"Processing {total_threads} threads")
 
-            for i, thread in enumerate(all_threads):
-                try:
-                    # Unarchive the thread if it's archived
-                    if thread.archived:
-                        await thread.edit(archived=False)
-                        logging.info(f"Unarchived thread: {thread.id}")
-
-                    thread_age = (
-                        discord.utils.utcnow() - thread.created_at
-                    ).total_seconds() / 3600
-                    first_message = await self.spreadsheet_service.fetch_first_message(
-                        thread
-                    )
-
-                    if first_message:
-                        # Count reactions
-                        yes_count = no_count = 0
-                        for reaction in first_message.reactions:
-                            if isinstance(reaction.emoji, discord.Emoji):
-                                if reaction.emoji.id == int(server_config.yes_emoji_id):
-                                    yes_count = reaction.count - 1
-                                elif reaction.emoji.id == int(
-                                    server_config.no_emoji_id
-                                ):
-                                    no_count = reaction.count - 1
-
-                        total_votes = yes_count + no_count
-                        vote_percentage = (
-                            (yes_count / total_votes * 100) if total_votes > 0 else 0
-                        )
-
-                        # Wait for a short period to ensure tags are updated
-                        await asyncio.sleep(1)
-
-                        # Use the helper function to manage tags
-                        await self.manage_thread_tags(
-                            thread, channel, vote_percentage, thread_age
-                        )
-
-                    # Log progress every 10 threads or when finished
-                    if (i + 1) % 10 == 0 or (i + 1) == total_threads:
-                        logging.info(
-                            f"Processed {i + 1}/{total_threads} threads in combined sync task"
-                        )
-
-                except Exception as e:
-                    logging.error(f"Error processing thread {thread.id}: {e}")
+            # ... rest of your spreadsheet sync logic ...
 
         except Exception as e:
             logging.error(f"Error in combined sync task: {e}", exc_info=True)
@@ -406,10 +433,11 @@ class SyncCog(commands.Cog, name="Synchronization"):
         server_config = self.config_manager.get_config(self.sync_guild_id)
         if server_config and server_config.is_configured:
             logging.info(
-                "Bot is configured, initializing SpreadsheetService and starting background task"
+                "Bot is configured, initializing SpreadsheetService and starting background tasks"
             )
             await self.spreadsheet_service.initialize_google_api()
             self.combined_sync_task.start()
+            self.manage_tags_task.start()
             self.background_task_running = True
         else:
             logging.info(
@@ -421,6 +449,7 @@ class SyncCog(commands.Cog, name="Synchronization"):
         logging.info("Closing SyncCog and related tasks.")
         if self.background_task_running:
             self.combined_sync_task.cancel()
+            self.manage_tags_task.cancel()
 
 
 async def setup(bot: commands.Bot):
